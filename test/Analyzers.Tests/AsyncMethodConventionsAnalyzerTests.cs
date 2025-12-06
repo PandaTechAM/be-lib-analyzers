@@ -170,7 +170,7 @@ public class AsyncMethodConventionsAnalyzerTests
    }
 
    [Fact]
-   public async Task Anonymous_lambda_missing_ct_reports_PT0002()
+   public async Task Anonymous_lambda_without_ct_is_ignored_when_delegate_has_no_ct()
    {
       const string code = """
                           using System;
@@ -180,12 +180,87 @@ public class AsyncMethodConventionsAnalyzerTests
                           {
                               public void Register()
                               {
-                                  Func<Task> handler = {|PT0002:async () =>
+                                  Func<Task> handler = async () =>
                                   {
                                       await Task.Delay(10);
-                                  }|};
+                                  };
                               }
                           }
+                          """;
+
+      await VerifyCS.VerifyAnalyzerAsync(code);
+   }
+
+
+   [Fact]
+   public async Task Hangfire_expression_lambda_is_ignored()
+   {
+      const string code = """
+                          using System;
+                          using System.Threading;
+                          using System.Threading.Tasks;
+
+                          public interface IUserManagementIntegrationService
+                          {
+                              Task UpdateAuthenticationHistoryMissingLocationsAsync(CancellationToken ct);
+                          }
+
+                          public static class Jobs
+                          {
+                              public static void Register()
+                              {
+                                  RecurringJob.AddOrUpdate<IUserManagementIntegrationService>(
+                                      "Update Authentication History Missing Locations",
+                                      service => service.UpdateAuthenticationHistoryMissingLocationsAsync(CancellationToken.None),
+                                      "0 * * * *",
+                                      TimeZoneInfo.Utc);
+                              }
+                          }
+
+                          public static class RecurringJob
+                          {
+                              public static void AddOrUpdate<T>(string id, System.Linq.Expressions.Expression<Func<T, Task>> method, string cron, TimeZoneInfo tz) { }
+                          }
+                          """;
+
+      await VerifyCS.VerifyAnalyzerAsync(code);
+   }
+
+   [Fact]
+   public async Task RequestDelegate_lambda_is_ignored()
+   {
+      const string code = """
+                          using System.Threading.Tasks;
+
+                          public static class Extensions
+                          {
+                              public static void Configure(IEndpointConventionBuilder builder)
+                              {
+                                  builder.Add(endpointBuilder =>
+                                  {
+                                      var original = endpointBuilder.RequestDelegate;
+                                      endpointBuilder.RequestDelegate = async context =>
+                                      {
+                                          await original!(context);
+                                      };
+                                  });
+                              }
+                          }
+
+                          public interface IEndpointConventionBuilder
+                          {
+                              void Add(System.Action<EndpointBuilder> convention);
+                          }
+
+                          public class EndpointBuilder
+                          {
+                              public RequestDelegate? RequestDelegate { get; set; }
+                          }
+
+                          // Fake ASP.NET-like types just for the test
+                          public class HttpContext { }
+
+                          public delegate Task RequestDelegate(HttpContext context);
                           """;
 
       await VerifyCS.VerifyAnalyzerAsync(code);
