@@ -6,7 +6,7 @@ using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 
-namespace Analyzers.Sample;
+namespace Analyzers.Sample.Async;
 
 public interface IOrderService
 {
@@ -101,8 +101,4 @@ public sealed class Order
    }
 
    public int Id { get; }
-}
-
-public class Examples
-{
 }

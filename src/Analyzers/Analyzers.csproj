@@ -18,13 +18,13 @@
         <PackageId>Pandatech.Analyzers</PackageId>
         <PackageIcon>pandatech.png</PackageIcon>
         <PackageReadmeFile>Readme.md</PackageReadmeFile>
-        <Version>1.0.0</Version>
+        <Version>1.1.0</Version>
         <Authors>Pandatech</Authors>
         <Description>Pandatech Roslyn analyzers enforcing company coding rules.</Description>
         <PackageLicenseExpression>MIT</PackageLicenseExpression>
         <PackageTags>Pandatech, analyzers, roslyn, async, cancellation, coding-rules</PackageTags>
         <RepositoryUrl>https://github.com/PandaTechAM/be-lib-analyzers</RepositoryUrl>
-        <PackageReleaseNotes>Init</PackageReleaseNotes>
+        <PackageReleaseNotes>Bug fix on external interfaces</PackageReleaseNotes>
 
 
     </PropertyGroup>

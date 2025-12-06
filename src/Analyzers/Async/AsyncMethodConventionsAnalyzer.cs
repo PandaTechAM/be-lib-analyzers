@@ -77,6 +77,24 @@ public sealed class AsyncMethodConventionsAnalyzer : DiagnosticAnalyzer
          return;
       }
 
+      // Only analyze methods declared in source (skip metadata / external assemblies).
+      var hasSourceLocation = false;
+      foreach (var location in method.Locations)
+      {
+         if (!location.IsInSource)
+         {
+            continue;
+         }
+
+         hasSourceLocation = true;
+         break;
+      }
+
+      if (!hasSourceLocation)
+      {
+         return;
+      }
+
       if (method.ReturnType is not INamedTypeSymbol returnType)
       {
          return;
@@ -123,27 +141,42 @@ public sealed class AsyncMethodConventionsAnalyzer : DiagnosticAnalyzer
       string displayName,
       Action<Diagnostic> report)
    {
-      // PT0001 – name must end with Async (for named methods).
+      var isContract = method.IsContractImplementation();
+
+      // PT0001 – name must end with Async (for named methods),
+      // but we DO NOT enforce it on contract implementations (MediatR Handle, overrides, etc.).
       if (!displayName.Equals("anonymous function", StringComparison.Ordinal) &&
-          !displayName.EndsWith("Async", StringComparison.Ordinal))
+          !displayName.EndsWith("Async", StringComparison.Ordinal) &&
+          !isContract)
       {
          report(Diagnostic.Create(AsyncSuffixRule, location, displayName));
       }
 
       var ctInfo = GetCancellationTokenInfo(method);
 
+      // PT0002 – missing CancellationToken
+      // Only enforced on non-contract methods (e.g. interface itself, normal class methods).
       if (!ctInfo.HasCt)
       {
-         report(Diagnostic.Create(CancellationTokenMissingRule, location, displayName));
+         if (!isContract)
+         {
+            report(Diagnostic.Create(CancellationTokenMissingRule, location, displayName));
+         }
+
          return;
       }
 
+      // PT0003 – name must be ct
+      // Always enforced when CT exists (both interface + implementation),
+      // so implementations still get "rename to ct".
       if (!ctInfo.IsNamedCt)
       {
          report(Diagnostic.Create(CancellationTokenNameRule, location, displayName, ctInfo.Name));
       }
 
-      if (!ctInfo.IsLast)
+      // PT0004 – CT must be last
+      // Only enforced on non-contract methods (interface / own class methods).
+      if (!ctInfo.IsLast && !isContract)
       {
          report(Diagnostic.Create(CancellationTokenPositionRule, location, displayName, ctInfo.Name));
       }
