@@ -198,9 +198,10 @@ public sealed class AsyncMethodConventionsAnalyzer : DiagnosticAnalyzer
       }
 
       // PT0003 – name must be ct
-      // Always enforced when CT exists (both interface + implementation),
-      // so implementations still get "rename to ct".
-      if (!ctInfo.IsNamedCt)
+// Enforced only on non-contract methods (interfaces / non-contract class methods).
+// Implementations of contracts (overrides / interface impls) are skipped so we don't
+// fight the “implementation params must match interface” rule or external contracts.
+      if (!ctInfo.IsNamedCt && !isContract)
       {
          report(Diagnostic.Create(CancellationTokenNameRule, location, displayName, ctInfo.Name));
       }
@@ -365,7 +366,7 @@ public sealed class AsyncMethodConventionsAnalyzer : DiagnosticAnalyzer
          "MapTrace" or
          "MapMethods";
    }
-   
+
 
    private static IAnonymousFunctionOperation? ExtractAnonymousFunction(IOperation value)
    {
