@@ -131,11 +131,16 @@ public sealed class AsyncMethodConventionsAnalyzer : DiagnosticAnalyzer
       }
 
       // For lambdas/anonymous functions we do NOT enforce "must have CT" (PT0002),
-      // because the delegate signature is usually dictated by an external API
-      // (Hangfire, ASP.NET, minimal APIs binder, etc.).
+      // because the delegate signature is usually dictated by an external API.
       // We only normalize name and position if a CT parameter already exists.
       var ctInfo = GetCancellationTokenInfo(symbol);
       if (!ctInfo.HasCt)
+      {
+         return;
+      }
+
+      // If the lambda is inside a test method, skip CT name/position completely.
+      if (IsInsideTestMethod(anon))
       {
          return;
       }
@@ -173,6 +178,10 @@ public sealed class AsyncMethodConventionsAnalyzer : DiagnosticAnalyzer
       Action<Diagnostic> report)
    {
       var isContract = method.IsContractImplementation();
+      var isTest = IsTestMethod(method);
+
+      // For CT missing / position we skip both contracts and tests.
+      var skipCtMissingAndPosition = isContract || isTest;
 
       // PT0001 – name must end with Async (for named methods),
       // but we DO NOT enforce it on contract implementations (MediatR Handle, overrides, etc.).
@@ -186,10 +195,10 @@ public sealed class AsyncMethodConventionsAnalyzer : DiagnosticAnalyzer
       var ctInfo = GetCancellationTokenInfo(method);
 
       // PT0002 – missing CancellationToken
-      // Only enforced on non-contract methods (e.g. interface itself, normal class methods).
+      // Only enforced on non-contract, non-test methods.
       if (!ctInfo.HasCt)
       {
-         if (!isContract)
+         if (!skipCtMissingAndPosition)
          {
             report(Diagnostic.Create(CancellationTokenMissingRule, location, displayName));
          }
@@ -198,17 +207,15 @@ public sealed class AsyncMethodConventionsAnalyzer : DiagnosticAnalyzer
       }
 
       // PT0003 – name must be ct
-// Enforced only on non-contract methods (interfaces / non-contract class methods).
-// Implementations of contracts (overrides / interface impls) are skipped so we don't
-// fight the “implementation params must match interface” rule or external contracts.
+      // Enforced only on non-contract methods (including tests, per "maybe maximum naming").
       if (!ctInfo.IsNamedCt && !isContract)
       {
          report(Diagnostic.Create(CancellationTokenNameRule, location, displayName, ctInfo.Name));
       }
 
       // PT0004 – CT must be last
-      // Only enforced on non-contract methods (interface / own class methods).
-      if (!ctInfo.IsLast && !isContract)
+      // Only enforced on non-contract, non-test methods.
+      if (!ctInfo.IsLast && !skipCtMissingAndPosition)
       {
          report(Diagnostic.Create(CancellationTokenPositionRule, location, displayName, ctInfo.Name));
       }
@@ -223,6 +230,49 @@ public sealed class AsyncMethodConventionsAnalyzer : DiagnosticAnalyzer
 
       return type.Name is "Task" or "ValueTask";
    }
+
+   private static bool IsTestMethod(IMethodSymbol method)
+   {
+      foreach (var attr in method.GetAttributes())
+      {
+         var attrClass = attr.AttributeClass;
+         if (attrClass is null)
+         {
+            continue;
+         }
+
+         var name = attrClass.Name;
+
+         if (name.EndsWith("Attribute", StringComparison.Ordinal))
+         {
+            name = name.Substring(0, name.Length - "Attribute".Length);
+         }
+
+         if (name is "Fact"
+             or "Theory"
+             or "Test"
+             or "TestCase"
+             or "TestMethod"
+             or "DataTestMethod")
+         {
+            return true;
+         }
+      }
+
+      return false;
+   }
+
+
+   private static bool IsInsideTestMethod(IAnonymousFunctionOperation anon)
+   {
+      if (anon.Symbol.ContainingSymbol is IMethodSymbol method)
+      {
+         return IsTestMethod(method);
+      }
+
+      return false;
+   }
+
 
    private static CtInfo GetCancellationTokenInfo(IMethodSymbol method)
    {
