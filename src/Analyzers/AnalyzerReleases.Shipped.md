@@ -3,7 +3,7 @@
 ### New Rules
 
 | Rule ID | Category   | Severity | Notes                          |
-|--------:|------------|----------|--------------------------------|
+|---------|------------|----------|--------------------------------|
 | PT0001  | AsyncUsage | Warning  | AsyncMethodConventionsAnalyzer |
 | PT0002  | AsyncUsage | Warning  | AsyncMethodConventionsAnalyzer |
 | PT0003  | AsyncUsage | Warning  | AsyncMethodConventionsAnalyzer |

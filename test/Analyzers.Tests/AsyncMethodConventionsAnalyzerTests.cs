@@ -1,9 +1,8 @@
 ﻿using System.Threading.Tasks;
 using Xunit;
-using VerifyCS =
-   Microsoft.CodeAnalysis.CSharp.Testing.CSharpAnalyzerVerifier<
-      Pandatech.Analyzers.Async.AsyncMethodConventionsAnalyzer,
-      Microsoft.CodeAnalysis.Testing.DefaultVerifier>;
+using VerifyCS = Microsoft.CodeAnalysis.CSharp.Testing.CSharpAnalyzerVerifier<
+   Pandatech.Analyzers.Async.AsyncMethodConventionsAnalyzer,
+   Microsoft.CodeAnalysis.Testing.DefaultVerifier>;
 
 namespace Analyzers.Tests;
 

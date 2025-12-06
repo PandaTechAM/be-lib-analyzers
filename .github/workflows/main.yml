@@ -10,6 +10,7 @@ on:
   push:
     branches:
       - main
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -18,16 +19,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup .NET Core
+      - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          global-json-file: global.json
+          dotnet-version: '8.0.x'
 
       - name: Build
-        run: dotnet build ${{ env.PROJECT_PATH }}
+        run: dotnet build ${{ env.PROJECT_PATH }} --configuration Release
 
       - name: Pack
-        run: dotnet pack ${{ env.PROJECT_PATH }} --output ${{ env.OUTPUT_DIR }}
+        run: dotnet pack ${{ env.PROJECT_PATH }} --configuration Release --output ${{ env.OUTPUT_DIR }}
 
       - name: Publish
         run: dotnet nuget push ${{ env.OUTPUT_DIR }}/*.nupkg -k ${{ env.NUGET_API_KEY }} -s ${{ env.NUGET_SOURCE }}

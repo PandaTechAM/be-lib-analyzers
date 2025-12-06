@@ -60,17 +60,10 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
       // 1. Lambda / anonymous function case (PT0002 / PT0003 / PT0004)
       // ------------------------------------------------------------------
 
-      CSharpSyntaxNode? lambdaNode = node.FirstAncestorOrSelf<ParenthesizedLambdaExpressionSyntax>();
+      var lambdaNode = node.FirstAncestorOrSelf<ParenthesizedLambdaExpressionSyntax>() ??
+                       (CSharpSyntaxNode?)node.FirstAncestorOrSelf<SimpleLambdaExpressionSyntax>();
 
-      if (lambdaNode is null)
-      {
-         lambdaNode = node.FirstAncestorOrSelf<SimpleLambdaExpressionSyntax>();
-      }
-
-      if (lambdaNode is null)
-      {
-         lambdaNode = node.FirstAncestorOrSelf<AnonymousMethodExpressionSyntax>();
-      }
+      lambdaNode ??= node.FirstAncestorOrSelf<AnonymousMethodExpressionSyntax>();
 
       if (lambdaNode is not null &&
           diagnosticId is AsyncMethodConventionsAnalyzer.CancellationTokenMissingId
@@ -102,7 +95,7 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
          return;
       }
 
-      var methodSymbol = semanticModel.GetDeclaredSymbol(methodDecl, cancellationToken) as IMethodSymbol;
+      var methodSymbol = semanticModel.GetDeclaredSymbol(methodDecl, cancellationToken);
       if (methodSymbol is null)
       {
          return;
@@ -152,7 +145,7 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
          CodeAction.Create(
             title,
             c => RenameMethodAsync(context.Document.Project.Solution, methodSymbol, newName, c),
-            equivalenceKey: "RenameToAsync"),
+            "RenameToAsync"),
          diagnostic);
    }
 
@@ -174,7 +167,7 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
             CodeAction.Create(
                title,
                c => AddCancellationTokenAsync(context.Document, methodDecl, c),
-               equivalenceKey: "AddCtParameter"),
+               "AddCtParameter"),
             diagnostic);
 
          return;
@@ -188,9 +181,12 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
          return;
       }
 
-      if (diagnosticId == AsyncMethodConventionsAnalyzer.CancellationTokenNameId)
+      switch (diagnosticId)
       {
-         if (!string.Equals(ctParam.Name, "ct", StringComparison.Ordinal))
+         case AsyncMethodConventionsAnalyzer.CancellationTokenNameId
+            when string.Equals(ctParam.Name, "ct", StringComparison.Ordinal):
+            return;
+         case AsyncMethodConventionsAnalyzer.CancellationTokenNameId:
          {
             var renameTitle = $"Rename '{ctParam.Name}' to 'ct'";
 
@@ -198,25 +194,26 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
                CodeAction.Create(
                   renameTitle,
                   c => RenameParameterAsync(context.Document.Project.Solution, ctParam, "ct", c),
-                  equivalenceKey: "RenameCtParameter"),
+                  "RenameCtParameter"),
                diagnostic);
+
+            return;
          }
-
-         return;
-      }
-
-      if (diagnosticId == AsyncMethodConventionsAnalyzer.CancellationTokenPositionId)
-      {
-         if (ctParam.Ordinal != methodSymbol.Parameters.Length - 1)
+         case AsyncMethodConventionsAnalyzer.CancellationTokenPositionId:
          {
-            var moveTitle = "Move CancellationToken parameter to last position";
+            if (ctParam.Ordinal != methodSymbol.Parameters.Length - 1)
+            {
+               const string moveTitle = "Move CancellationToken parameter to last position";
 
-            context.RegisterCodeFix(
-               CodeAction.Create(
-                  moveTitle,
-                  c => MoveCancellationTokenToLastAsync(context.Document, methodDecl, ctParam, c),
-                  equivalenceKey: "MoveCtParameterLast"),
-               diagnostic);
+               context.RegisterCodeFix(
+                  CodeAction.Create(
+                     moveTitle,
+                     c => MoveCancellationTokenToLastAsync(context.Document, methodDecl, ctParam, c),
+                     "MoveCtParameterLast"),
+                  diagnostic);
+            }
+
+            break;
          }
       }
    }
@@ -249,13 +246,13 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
       {
          case AsyncMethodConventionsAnalyzer.CancellationTokenMissingId:
          {
-            var title = "Add CancellationToken ct parameter";
+            const string title = "Add CancellationToken ct parameter";
 
             context.RegisterCodeFix(
                CodeAction.Create(
                   title,
                   c => AddCancellationTokenToLambdaAsync(context.Document, lambdaExpr, c),
-                  equivalenceKey: "AddCtParameterToLambda"),
+                  "AddCtParameterToLambda"),
                diagnostic);
 
             break;
@@ -274,7 +271,7 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
                CodeAction.Create(
                   renameTitle,
                   c => RenameParameterAsync(context.Document.Project.Solution, ctParam, "ct", c),
-                  equivalenceKey: "RenameLambdaCtParameter"),
+                  "RenameLambdaCtParameter"),
                diagnostic);
 
             break;
@@ -293,7 +290,7 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
                CodeAction.Create(
                   moveTitle,
                   c => MoveCancellationTokenToLastInLambdaAsync(context.Document, lambdaExpr, ctParam, c),
-                  equivalenceKey: "MoveLambdaCtParameterLast"),
+                  "MoveLambdaCtParameterLast"),
                diagnostic);
 
             break;
@@ -416,11 +413,13 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
       for (var i = 0; i < parameters.Count; i++)
       {
          var p = parameters[i];
-         if (string.Equals(p.Identifier.Text, ctSymbol.Name, StringComparison.Ordinal))
+         if (!string.Equals(p.Identifier.Text, ctSymbol.Name, StringComparison.Ordinal))
          {
-            ctIndex = i;
-            break;
+            continue;
          }
+
+         ctIndex = i;
+         break;
       }
 
       if (ctIndex < 0 || ctIndex == parameters.Count - 1)
@@ -523,12 +522,8 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
    {
       var root = await document.GetSyntaxRootAsync(cancellationToken)
                                .ConfigureAwait(false);
-      if (root is null)
-      {
-         return document;
-      }
 
-      if (lambdaExpr is not ParenthesizedLambdaExpressionSyntax parenthesized)
+      if (root is null || lambdaExpr is not ParenthesizedLambdaExpressionSyntax parenthesized)
       {
          return document;
       }
@@ -539,11 +534,13 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
       for (var i = 0; i < parameters.Count; i++)
       {
          var p = parameters[i];
-         if (string.Equals(p.Identifier.Text, ctSymbol.Name, StringComparison.Ordinal))
+         if (!string.Equals(p.Identifier.Text, ctSymbol.Name, StringComparison.Ordinal))
          {
-            ctIndex = i;
-            break;
+            continue;
          }
+
+         ctIndex = i;
+         break;
       }
 
       if (ctIndex < 0 || ctIndex == parameters.Count - 1)

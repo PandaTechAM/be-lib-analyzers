@@ -20,7 +20,7 @@ public sealed class AsyncMethodConventionsAnalyzer : DiagnosticAnalyzer
       "Async method '{0}' should be suffixed with 'Async'",
       "AsyncUsage",
       DiagnosticSeverity.Warning,
-      isEnabledByDefault: true);
+      true);
 
    private static readonly DiagnosticDescriptor CancellationTokenMissingRule = new(
       CancellationTokenMissingId,
@@ -28,7 +28,7 @@ public sealed class AsyncMethodConventionsAnalyzer : DiagnosticAnalyzer
       "Async method '{0}' should declare a CancellationToken parameter",
       "AsyncUsage",
       DiagnosticSeverity.Warning,
-      isEnabledByDefault: true);
+      true);
 
    private static readonly DiagnosticDescriptor CancellationTokenNameRule = new(
       CancellationTokenNameId,
@@ -36,7 +36,7 @@ public sealed class AsyncMethodConventionsAnalyzer : DiagnosticAnalyzer
       "Async method '{0}' has CancellationToken parameter '{1}'; rename it to 'ct'",
       "AsyncUsage",
       DiagnosticSeverity.Warning,
-      isEnabledByDefault: true);
+      true);
 
    private static readonly DiagnosticDescriptor CancellationTokenPositionRule = new(
       CancellationTokenPositionId,
@@ -44,7 +44,7 @@ public sealed class AsyncMethodConventionsAnalyzer : DiagnosticAnalyzer
       "Async method '{0}' has CancellationToken parameter '{1}' that should be the last parameter",
       "AsyncUsage",
       DiagnosticSeverity.Warning,
-      isEnabledByDefault: true);
+      true);
 
    public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics { get; } =
       ImmutableArray.Create(
@@ -118,8 +118,7 @@ public sealed class AsyncMethodConventionsAnalyzer : DiagnosticAnalyzer
          context.ReportDiagnostic);
    }
 
-   private static void AnalyzeAsyncMember(
-      IMethodSymbol method,
+   private static void AnalyzeAsyncMember(IMethodSymbol method,
       Location location,
       string displayName,
       Action<Diagnostic> report)
@@ -160,31 +159,13 @@ public sealed class AsyncMethodConventionsAnalyzer : DiagnosticAnalyzer
       return type.Name is "Task" or "ValueTask";
    }
 
-   private readonly struct CtInfo
-   {
-      public bool HasCt { get; }
-      public bool IsNamedCt { get; }
-      public bool IsLast { get; }
-      public string Name { get; }
-
-      public CtInfo(bool hasCt, bool isNamedCt, bool isLast, string name)
-      {
-         HasCt = hasCt;
-         IsNamedCt = isNamedCt;
-         IsLast = isLast;
-         Name = name;
-      }
-   }
-
    private static CtInfo GetCancellationTokenInfo(IMethodSymbol method)
    {
       IParameterSymbol? ctParam = null;
       var parameters = method.Parameters;
 
-      for (var i = 0; i < parameters.Length; i++)
+      foreach (var p in parameters)
       {
-         var p = parameters[i];
-
          if (p.Type is not INamedTypeSymbol named)
          {
             continue;
@@ -213,5 +194,13 @@ public sealed class AsyncMethodConventionsAnalyzer : DiagnosticAnalyzer
       var isLast = ctParam.Ordinal == parameters.Length - 1;
 
       return new CtInfo(true, isNamedCt, isLast, ctParam.Name);
+   }
+
+   private readonly struct CtInfo(bool hasCt, bool isNamedCt, bool isLast, string name)
+   {
+      public bool HasCt { get; } = hasCt;
+      public bool IsNamedCt { get; } = isNamedCt;
+      public bool IsLast { get; } = isLast;
+      public string Name { get; } = name;
    }
 }
