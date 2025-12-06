@@ -92,4 +92,102 @@ public class AsyncMethodConventionsAnalyzerTests
 
       await VerifyCS.VerifyAnalyzerAsync(code);
    }
+
+   [Fact]
+   public async Task Missing_ct_on_interface_and_implementation_reports_only_on_interface()
+   {
+      const string code = """
+                          using System.Threading;
+                          using System.Threading.Tasks;
+
+                          public interface IService
+                          {
+                              Task {|PT0002:GetValueAsync|}();
+                          }
+
+                          public class Service : IService
+                          {
+                              public Task GetValueAsync() => Task.CompletedTask; // no PT0002 here
+                          }
+                          """;
+
+      await VerifyCS.VerifyAnalyzerAsync(code);
+   }
+
+   [Fact]
+   public async Task Ct_name_rule_applies_on_contract_implementation()
+   {
+      const string code = """
+                          using System.Threading;
+                          using System.Threading.Tasks;
+
+                          public interface IService
+                          {
+                              Task GetValueAsync(CancellationToken ct);
+                          }
+
+                          public class Service : IService
+                          {
+                              public Task {|PT0003:GetValueAsync|}(CancellationToken token) => Task.CompletedTask;
+                          }
+                          """;
+
+      await VerifyCS.VerifyAnalyzerAsync(code);
+   }
+
+   [Fact]
+   public async Task Ct_before_params_is_considered_last_non_params()
+   {
+      const string code = """
+                          using System.Threading;
+                          using System.Threading.Tasks;
+
+                          public class Service
+                          {
+                              public Task GetValueAsync(CancellationToken ct, params string[] values)
+                                  => Task.CompletedTask;
+                          }
+                          """;
+
+      await VerifyCS.VerifyAnalyzerAsync(code);
+   }
+
+   [Fact]
+   public async Task Ct_before_other_non_params_reports_PT0004_even_with_params()
+   {
+      const string code = """
+                          using System.Threading;
+                          using System.Threading.Tasks;
+
+                          public class Service
+                          {
+                              public Task {|PT0004:GetValueAsync|}(CancellationToken ct, int id, params string[] values)
+                                  => Task.CompletedTask;
+                          }
+                          """;
+
+      await VerifyCS.VerifyAnalyzerAsync(code);
+   }
+
+   [Fact]
+   public async Task Anonymous_lambda_missing_ct_reports_PT0002()
+   {
+      const string code = """
+                          using System;
+                          using System.Threading.Tasks;
+
+                          public class Service
+                          {
+                              public void Register()
+                              {
+                                  Func<Task> handler = {|PT0002:async () =>
+                                  {
+                                      await Task.Delay(10);
+                                  }|};
+                              }
+                          }
+                          """;
+
+      await VerifyCS.VerifyAnalyzerAsync(code);
+   }
 }

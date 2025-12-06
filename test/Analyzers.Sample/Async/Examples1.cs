@@ -18,6 +18,8 @@ public interface IOrderService
 
    // ❌ PT0002 (CT is not last, name is wrong)
    Task<Order> GetOrderByCodeAsync(CancellationToken token, string code);
+   Task<Order> GetSomethingAsync(params string[] args);
+   Task<Order> GetMeAsync(int id = 5, params object[] args);
 }
 
 public sealed class OrderService : IOrderService
@@ -37,6 +39,16 @@ public sealed class OrderService : IOrderService
    {
       return Task.FromResult(new Order(42));
       // PT0002
+   }
+
+   public Task<Order> GetSomethingAsync(params string[] args)
+   {
+      throw new System.NotImplementedException();
+   }
+
+   public Task<Order> GetMeAsync(int id = 5, params object[] args)
+   {
+      throw new System.NotImplementedException();
    }
 }
 

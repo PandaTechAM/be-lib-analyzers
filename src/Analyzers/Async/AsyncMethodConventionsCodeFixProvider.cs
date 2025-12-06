@@ -418,16 +418,39 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
          newRoot = newRoot.AddUsings(usingDirective);
       }
 
+      var parameters = methodDecl.ParameterList.Parameters;
+
       var ctType = SyntaxFactory.IdentifierName("CancellationToken");
       var ctParam = SyntaxFactory.Parameter(SyntaxFactory.Identifier("ct"))
-                                 .WithType(ctType);
+                                 .WithType(ctType)
+                                 .WithDefault(
+                                    SyntaxFactory.EqualsValueClause(
+                                       SyntaxFactory.LiteralExpression(SyntaxKind.DefaultLiteralExpression)));
 
-      var newParamList = methodDecl.ParameterList.AddParameters(ctParam);
-      var newMethod = methodDecl.WithParameterList(newParamList);
+      // Insert CT before any params parameter; otherwise at the end.
+      var insertIndex = parameters.Count;
+      for (var i = 0; i < parameters.Count; i++)
+      {
+         if (!parameters[i]
+              .Modifiers
+              .Any(SyntaxKind.ParamsKeyword))
+         {
+            continue;
+         }
+
+         insertIndex = i;
+         break;
+      }
+
+      var newParameters = parameters.Insert(insertIndex, ctParam);
+
+      var newMethod = methodDecl.WithParameterList(
+         methodDecl.ParameterList.WithParameters(newParameters));
 
       newRoot = newRoot.ReplaceNode(methodDecl, newMethod);
       return document.WithSyntaxRoot(newRoot);
    }
+
 
    private static bool HasSystemThreadingUsing(CompilationUnitSyntax root)
    {
@@ -468,14 +491,61 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
          break;
       }
 
-      if (ctIndex < 0 || ctIndex == parameters.Count - 1)
+      if (ctIndex < 0)
+      {
+         return document;
+      }
+
+      // Find params parameter (if any)
+      var paramsIndex = -1;
+      for (var i = 0; i < parameters.Count; i++)
+      {
+         if (!parameters[i]
+              .Modifiers
+              .Any(SyntaxKind.ParamsKeyword))
+         {
+            continue;
+         }
+
+         paramsIndex = i;
+         break;
+      }
+
+      // Already in the correct spot?
+      var alreadyCorrect =
+         (paramsIndex < 0 && ctIndex == parameters.Count - 1) ||
+         (paramsIndex >= 0 && ctIndex == paramsIndex - 1);
+
+      if (alreadyCorrect)
       {
          return document;
       }
 
       var ctSyntax = parameters[ctIndex];
-      var newParameters = parameters.RemoveAt(ctIndex)
-                                    .Add(ctSyntax);
+      var withoutCt = parameters.RemoveAt(ctIndex);
+
+      // Recompute params index after removal
+      var newParamsIndex = -1;
+      for (var i = 0; i < withoutCt.Count; i++)
+      {
+         if (!withoutCt[i]
+              .Modifiers
+              .Any(SyntaxKind.ParamsKeyword))
+         {
+            continue;
+         }
+
+         newParamsIndex = i;
+         break;
+      }
+
+      // Insert CT just before params
+      var newParameters =
+         newParamsIndex >= 0
+            ? withoutCt.Insert(newParamsIndex, ctSyntax)
+            :
+            // No params -> CT becomes last
+            withoutCt.Add(ctSyntax);
 
       var newMethod = methodDecl.WithParameterList(
          methodDecl.ParameterList.WithParameters(newParameters));
@@ -490,6 +560,7 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
       var newRoot = root.ReplaceNode(methodDecl, newMethod);
       return document.WithSyntaxRoot(newRoot);
    }
+
 
    // ----------------------------------------------------------------------
    // Syntax-level helpers – lambdas / anonymous functions
@@ -659,20 +730,34 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
                   }
                }
 
-               // Build parameter differently for interface vs implementation
-               var ctParam = SyntaxFactory.Parameter(SyntaxFactory.Identifier("ct"))
-                                          .WithType(ctType);
+               var parameters = original.ParameterList.Parameters;
 
-               if (original.Parent is InterfaceDeclarationSyntax)
+               // Always: CancellationToken ct = default
+               var ctParam = SyntaxFactory.Parameter(SyntaxFactory.Identifier("ct"))
+                                          .WithType(ctType)
+                                          .WithDefault(
+                                             SyntaxFactory.EqualsValueClause(
+                                                SyntaxFactory.LiteralExpression(SyntaxKind.DefaultLiteralExpression)));
+
+               // Insert CT before any params parameter; otherwise at the end.
+               var insertIndex = parameters.Count;
+               for (var i = 0; i < parameters.Count; i++)
                {
-                  // interface: CancellationToken ct = default
-                  ctParam = ctParam.WithDefault(
-                     SyntaxFactory.EqualsValueClause(
-                        SyntaxFactory.LiteralExpression(SyntaxKind.DefaultLiteralExpression)));
+                  if (!parameters[i]
+                       .Modifiers
+                       .Any(SyntaxKind.ParamsKeyword))
+                  {
+                     continue;
+                  }
+
+                  insertIndex = i;
+                  break;
                }
 
-               var newParamList = original.ParameterList.AddParameters(ctParam);
-               return original.WithParameterList(newParamList);
+               var newParameters = parameters.Insert(insertIndex, ctParam);
+
+               return original.WithParameterList(
+                  original.ParameterList.WithParameters(newParameters));
             });
 
          solution = solution.WithDocumentSyntaxRoot(docId, updatedRoot);
@@ -705,21 +790,9 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
       }
 
       var methodsByDocument = new Dictionary<DocumentId, ImmutableArray<MethodDeclarationSyntax>.Builder>();
-      var ctIndexBySyntax = new Dictionary<MethodDeclarationSyntax, int>();
 
       foreach (var method in allMethods)
       {
-         var ctParam = method.Parameters.FirstOrDefault(p => IsCancellationToken(p.Type));
-         if (ctParam is null)
-         {
-            continue;
-         }
-
-         if (ctParam.Ordinal == method.Parameters.Length - 1)
-         {
-            continue;
-         }
-
          foreach (var syntaxRef in method.DeclaringSyntaxReferences)
          {
             var syntax = await syntaxRef.GetSyntaxAsync(cancellationToken)
@@ -744,7 +817,6 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
             }
 
             list.Add(methodDecl);
-            ctIndexBySyntax[methodDecl] = ctParam.Ordinal;
          }
       }
 
@@ -770,20 +842,69 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
             methodDecls,
             (original, _) =>
             {
-               if (!ctIndexBySyntax.TryGetValue(original, out var ctIndex))
+               var parameters = original.ParameterList.Parameters;
+
+               // Find CT parameter syntax
+               var ctIndex = -1;
+               for (var i = 0; i < parameters.Count; i++)
+               {
+                  var p = parameters[i];
+                  if (p.Type is IdentifierNameSyntax id &&
+                      string.Equals(id.Identifier.Text, "CancellationToken", StringComparison.Ordinal))
+                  {
+                     ctIndex = i;
+                     break;
+                  }
+               }
+
+               if (ctIndex < 0)
                {
                   return original;
                }
 
-               var parameters = original.ParameterList.Parameters;
-               if (ctIndex < 0 || ctIndex >= parameters.Count || ctIndex == parameters.Count - 1)
+               // Find params parameter
+               var paramsIndex = -1;
+               for (var i = 0; i < parameters.Count; i++)
+               {
+                  if (parameters[i]
+                      .Modifiers
+                      .Any(SyntaxKind.ParamsKeyword))
+                  {
+                     paramsIndex = i;
+                     break;
+                  }
+               }
+
+               var alreadyCorrect =
+                  (paramsIndex < 0 && ctIndex == parameters.Count - 1) ||
+                  (paramsIndex >= 0 && ctIndex == paramsIndex - 1);
+
+               if (alreadyCorrect)
                {
                   return original;
                }
 
                var ctSyntax = parameters[ctIndex];
-               var newParameters = parameters.RemoveAt(ctIndex)
-                                             .Add(ctSyntax);
+               var withoutCt = parameters.RemoveAt(ctIndex);
+
+               // Recompute params index after removal
+               var newParamsIndex = -1;
+               for (var i = 0; i < withoutCt.Count; i++)
+               {
+                  if (!withoutCt[i]
+                       .Modifiers
+                       .Any(SyntaxKind.ParamsKeyword))
+                  {
+                     continue;
+                  }
+
+                  newParamsIndex = i;
+                  break;
+               }
+
+               var newParameters = newParamsIndex >= 0
+                  ? withoutCt.Insert(newParamsIndex, ctSyntax)
+                  : withoutCt.Add(ctSyntax);
 
                return original.WithParameterList(
                   original.ParameterList.WithParameters(newParameters));
