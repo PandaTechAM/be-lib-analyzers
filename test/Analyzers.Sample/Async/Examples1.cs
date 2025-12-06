@@ -43,6 +43,7 @@ public sealed class OrderService : IOrderService
 
    public Task<Order> GetSomethingAsync(CancellationToken ct = default, params string[] args)
    {
+      ct.ThrowIfCancellationRequested();
       throw new System.NotImplementedException();
    }
 
