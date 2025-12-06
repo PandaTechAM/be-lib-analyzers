@@ -58,14 +58,9 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
       var span = diagnostic.Location.SourceSpan;
       var node = root.FindNode(span, getInnermostNodeForTie: true);
 
-      // ------------------------------------------------------------------
-      // 1. Lambda / anonymous function case (PT0002 / PT0003 / PT0004)
-      // ------------------------------------------------------------------
-
       var lambdaNode = node.FirstAncestorOrSelf<ParenthesizedLambdaExpressionSyntax>() ??
-                       (CSharpSyntaxNode?)node.FirstAncestorOrSelf<SimpleLambdaExpressionSyntax>();
-
-      lambdaNode ??= node.FirstAncestorOrSelf<AnonymousMethodExpressionSyntax>();
+                       (CSharpSyntaxNode?)node.FirstAncestorOrSelf<SimpleLambdaExpressionSyntax>() ??
+                       node.FirstAncestorOrSelf<AnonymousMethodExpressionSyntax>();
 
       if (lambdaNode is not null &&
           diagnosticId is AsyncMethodConventionsAnalyzer.CancellationTokenMissingId
@@ -82,17 +77,8 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
          return;
       }
 
-      // ------------------------------------------------------------------
-      // 2. Method / interface declaration case (your original logic)
-      // ------------------------------------------------------------------
-
       var methodDecl = node.FirstAncestorOrSelf<MethodDeclarationSyntax>();
-      if (methodDecl is null)
-      {
-         return;
-      }
-
-      if (!methodDecl.Identifier.Span.IntersectsWith(span))
+      if (methodDecl is null || !methodDecl.Identifier.Span.IntersectsWith(span))
       {
          return;
       }
@@ -126,15 +112,10 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
       }
    }
 
-   // ----------------------------------------------------------------------
-   // PT0001: rename method to *Async
-   // ----------------------------------------------------------------------
-
    private static void RegisterAsyncSuffixFix(CodeFixContext context,
       Diagnostic diagnostic,
       IMethodSymbol methodSymbol)
    {
-      // Extra safety: do not rename contract implementations even if a diagnostic appears.
       if (methodSymbol.IsContractImplementation())
       {
          return;
@@ -157,19 +138,20 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
          diagnostic);
    }
 
-   // ----------------------------------------------------------------------
-   // PT0002 / PT0003 / PT0004 – methods & interfaces
-   // ----------------------------------------------------------------------
-
    private static void RegisterCancellationTokenFixesForMethod(CodeFixContext context,
       Diagnostic diagnostic,
       MethodDeclarationSyntax methodDecl,
       IMethodSymbol methodSymbol,
       string diagnosticId)
    {
+      if (methodSymbol.IsMiddleware())
+      {
+         return;
+      }
+
       if (diagnosticId == AsyncMethodConventionsAnalyzer.CancellationTokenMissingId)
       {
-         var title = "Add CancellationToken ct parameter";
+         const string title = "Add CancellationToken ct parameter";
 
          var isInterfaceMethod = methodSymbol.ContainingType?.TypeKind == TypeKind.Interface;
 
@@ -198,9 +180,7 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
          return;
       }
 
-      var ctParam = methodSymbol.Parameters
-                                .FirstOrDefault(p => IsCancellationToken(p.Type));
-
+      var ctParam = methodSymbol.Parameters.FirstOrDefault(p => p.Type.IsCancellationToken());
       if (ctParam is null)
       {
          return;
@@ -233,7 +213,6 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
                return;
             }
 
-            // Non-interface method: simple symbol rename
             if (string.Equals(ctParam.Name, "ct", StringComparison.Ordinal))
             {
                return;
@@ -259,7 +238,6 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
             }
 
             const string moveTitle = "Move CancellationToken parameter to last position";
-
             var isInterfaceMethod = methodSymbol.ContainingType?.TypeKind == TypeKind.Interface;
 
             if (isInterfaceMethod)
@@ -289,10 +267,6 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
       }
    }
 
-   // ----------------------------------------------------------------------
-   // PT0002 / PT0003 / PT0004 – lambdas / anonymous functions
-   // ----------------------------------------------------------------------
-
    private static void RegisterLambdaCancellationTokenFixes(CodeFixContext context,
       Diagnostic diagnostic,
       CSharpSyntaxNode lambdaNode,
@@ -311,7 +285,7 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
       }
 
       var symbol = operation.Symbol;
-      var ctParam = symbol.Parameters.FirstOrDefault(p => IsCancellationToken(p.Type));
+      var ctParam = symbol.Parameters.FirstOrDefault(p => p.Type.IsCancellationToken());
 
       switch (diagnostic.Id)
       {
@@ -369,10 +343,6 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
       }
    }
 
-   // ----------------------------------------------------------------------
-   // Symbol-level helpers
-   // ----------------------------------------------------------------------
-
    private static Task<Solution> RenameMethodAsync(Solution solution,
       IMethodSymbol methodSymbol,
       string newName,
@@ -399,28 +369,6 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
          cancellationToken);
    }
 
-   private static bool IsCancellationToken(ITypeSymbol type)
-   {
-      if (type is not INamedTypeSymbol named)
-      {
-         return false;
-      }
-
-      if (!string.Equals(named.Name, "CancellationToken", StringComparison.Ordinal))
-      {
-         return false;
-      }
-
-      return string.Equals(
-         named.ContainingNamespace.ToDisplayString(),
-         "System.Threading",
-         StringComparison.Ordinal);
-   }
-
-   // ----------------------------------------------------------------------
-   // Syntax-level helpers – methods
-   // ----------------------------------------------------------------------
-
    private static async Task<Document> AddCancellationTokenAsync(Document document,
       MethodDeclarationSyntax methodDecl,
       CancellationToken cancellationToken)
@@ -434,7 +382,7 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
 
       var newRoot = compilationUnit;
 
-      if (!HasSystemThreadingUsing(compilationUnit))
+      if (!compilationUnit.HasUsing("System.Threading"))
       {
          var usingDirective = SyntaxFactory.UsingDirective(
                                               SyntaxFactory.ParseName("System.Threading"))
@@ -452,7 +400,6 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
                                     SyntaxFactory.EqualsValueClause(
                                        SyntaxFactory.LiteralExpression(SyntaxKind.DefaultLiteralExpression)));
 
-      // Insert CT before any params parameter; otherwise at the end.
       var insertIndex = parameters.Count;
       for (var i = 0; i < parameters.Count; i++)
       {
@@ -468,32 +415,11 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
       }
 
       var newParameters = parameters.Insert(insertIndex, ctParam);
-
       var newMethod = methodDecl.WithParameterList(
          methodDecl.ParameterList.WithParameters(newParameters));
 
       newRoot = newRoot.ReplaceNode(methodDecl, newMethod);
       return document.WithSyntaxRoot(newRoot);
-   }
-
-
-   private static bool HasSystemThreadingUsing(CompilationUnitSyntax root)
-   {
-      foreach (var u in root.Usings)
-      {
-         if (u.Name is null)
-         {
-            continue;
-         }
-
-         var name = u.Name.ToString();
-         if (name == "System.Threading")
-         {
-            return true;
-         }
-      }
-
-      return false;
    }
 
    private static async Task<Document> MoveCancellationTokenToLastAsync(Document document,
@@ -506,8 +432,7 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
       var ctIndex = -1;
       for (var i = 0; i < parameters.Count; i++)
       {
-         var p = parameters[i];
-         if (!string.Equals(p.Identifier.Text, ctSymbol.Name, StringComparison.Ordinal))
+         if (!string.Equals(parameters[i].Identifier.Text, ctSymbol.Name, StringComparison.Ordinal))
          {
             continue;
          }
@@ -521,7 +446,6 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
          return document;
       }
 
-      // Find params parameter (if any)
       var paramsIndex = -1;
       for (var i = 0; i < parameters.Count; i++)
       {
@@ -536,7 +460,6 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
          break;
       }
 
-      // Already in the correct spot?
       var alreadyCorrect =
          (paramsIndex < 0 && ctIndex == parameters.Count - 1) ||
          (paramsIndex >= 0 && ctIndex == paramsIndex - 1);
@@ -549,7 +472,6 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
       var ctSyntax = parameters[ctIndex];
       var withoutCt = parameters.RemoveAt(ctIndex);
 
-      // Recompute params index after removal
       var newParamsIndex = -1;
       for (var i = 0; i < withoutCt.Count; i++)
       {
@@ -564,13 +486,10 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
          break;
       }
 
-      // Insert CT just before params
       var newParameters =
          newParamsIndex >= 0
             ? withoutCt.Insert(newParamsIndex, ctSyntax)
-            :
-            // No params -> CT becomes last
-            withoutCt.Add(ctSyntax);
+            : withoutCt.Add(ctSyntax);
 
       var newMethod = methodDecl.WithParameterList(
          methodDecl.ParameterList.WithParameters(newParameters));
@@ -585,11 +504,6 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
       var newRoot = root.ReplaceNode(methodDecl, newMethod);
       return document.WithSyntaxRoot(newRoot);
    }
-
-
-   // ----------------------------------------------------------------------
-   // Syntax-level helpers – lambdas / anonymous functions
-   // ----------------------------------------------------------------------
 
    private static async Task<Document> AddCancellationTokenToLambdaAsync(Document document,
       ExpressionSyntax lambdaExpr,
@@ -661,59 +575,16 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
       IMethodSymbol interfaceMethod,
       CancellationToken cancellationToken)
    {
-      var allMethods = ImmutableArray.CreateBuilder<IMethodSymbol>();
-      allMethods.Add(interfaceMethod);
-
-      var impls = await SymbolFinder.FindImplementationsAsync(
-                                       interfaceMethod,
-                                       solution,
-                                       projects: null,
-                                       cancellationToken)
-                                    .ConfigureAwait(false);
-
-      foreach (var impl in impls.OfType<IMethodSymbol>())
-      {
-         if (impl.DeclaringSyntaxReferences.Length > 0)
-         {
-            allMethods.Add(impl);
-         }
-      }
-
-      var methodsByDocument = new Dictionary<DocumentId, ImmutableArray<MethodDeclarationSyntax>.Builder>();
-
-      foreach (var method in allMethods)
-      {
-         foreach (var syntaxRef in method.DeclaringSyntaxReferences)
-         {
-            var syntax = await syntaxRef.GetSyntaxAsync(cancellationToken)
-                                        .ConfigureAwait(false);
-            if (syntax is not MethodDeclarationSyntax methodDecl)
-            {
-               continue;
-            }
-
-            var doc = solution.GetDocument(methodDecl.SyntaxTree);
-            if (doc is null)
-            {
-               continue;
-            }
-
-            var docId = doc.Id;
-
-            if (!methodsByDocument.TryGetValue(docId, out var list))
-            {
-               list = ImmutableArray.CreateBuilder<MethodDeclarationSyntax>();
-               methodsByDocument[docId] = list;
-            }
-
-            list.Add(methodDecl);
-         }
-      }
+      var methodsByDocument = await GetInterfaceAndImplementationDeclarationsAsync(
+            solution,
+            interfaceMethod,
+            cancellationToken)
+         .ConfigureAwait(false);
 
       foreach (var kvp in methodsByDocument)
       {
          var docId = kvp.Key;
-         var methodDecls = kvp.Value.ToImmutable();
+         var methodDecls = kvp.Value;
 
          var document = solution.GetDocument(docId);
          if (document is null)
@@ -730,7 +601,7 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
 
          var updatedRoot = compilationUnit;
 
-         if (!HasSystemThreadingUsing(compilationUnit))
+         if (!compilationUnit.HasUsing("System.Threading"))
          {
             var usingDirective = SyntaxFactory.UsingDirective(
                                                  SyntaxFactory.ParseName("System.Threading"))
@@ -745,7 +616,6 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
             methodDecls,
             (original, _) =>
             {
-               // Skip if method already has a CancellationToken.
                foreach (var p in original.ParameterList.Parameters)
                {
                   if (p.Type is IdentifierNameSyntax id &&
@@ -757,14 +627,12 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
 
                var parameters = original.ParameterList.Parameters;
 
-               // Always: CancellationToken ct = default
                var ctParam = SyntaxFactory.Parameter(SyntaxFactory.Identifier("ct"))
                                           .WithType(ctType)
                                           .WithDefault(
                                              SyntaxFactory.EqualsValueClause(
                                                 SyntaxFactory.LiteralExpression(SyntaxKind.DefaultLiteralExpression)));
 
-               // Insert CT before any params parameter; otherwise at the end.
                var insertIndex = parameters.Count;
                for (var i = 0; i < parameters.Count; i++)
                {
@@ -791,64 +659,20 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
       return solution;
    }
 
-
    private static async Task<Solution> MoveCancellationTokenToLastForInterfaceAndImplementationsAsync(Solution solution,
       IMethodSymbol interfaceMethod,
       CancellationToken cancellationToken)
    {
-      var allMethods = ImmutableArray.CreateBuilder<IMethodSymbol>();
-      allMethods.Add(interfaceMethod);
-
-      var impls = await SymbolFinder.FindImplementationsAsync(
-                                       interfaceMethod,
-                                       solution,
-                                       projects: null,
-                                       cancellationToken)
-                                    .ConfigureAwait(false);
-
-      foreach (var impl in impls.OfType<IMethodSymbol>())
-      {
-         if (impl.DeclaringSyntaxReferences.Length > 0)
-         {
-            allMethods.Add(impl);
-         }
-      }
-
-      var methodsByDocument = new Dictionary<DocumentId, ImmutableArray<MethodDeclarationSyntax>.Builder>();
-
-      foreach (var method in allMethods)
-      {
-         foreach (var syntaxRef in method.DeclaringSyntaxReferences)
-         {
-            var syntax = await syntaxRef.GetSyntaxAsync(cancellationToken)
-                                        .ConfigureAwait(false);
-            if (syntax is not MethodDeclarationSyntax methodDecl)
-            {
-               continue;
-            }
-
-            var doc = solution.GetDocument(methodDecl.SyntaxTree);
-            if (doc is null)
-            {
-               continue;
-            }
-
-            var docId = doc.Id;
-
-            if (!methodsByDocument.TryGetValue(docId, out var list))
-            {
-               list = ImmutableArray.CreateBuilder<MethodDeclarationSyntax>();
-               methodsByDocument[docId] = list;
-            }
-
-            list.Add(methodDecl);
-         }
-      }
+      var methodsByDocument = await GetInterfaceAndImplementationDeclarationsAsync(
+            solution,
+            interfaceMethod,
+            cancellationToken)
+         .ConfigureAwait(false);
 
       foreach (var kvp in methodsByDocument)
       {
          var docId = kvp.Key;
-         var methodDecls = kvp.Value.ToImmutable();
+         var methodDecls = kvp.Value;
 
          var document = solution.GetDocument(docId);
          if (document is null)
@@ -869,17 +693,17 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
             {
                var parameters = original.ParameterList.Parameters;
 
-               // Find CT parameter syntax
                var ctIndex = -1;
                for (var i = 0; i < parameters.Count; i++)
                {
-                  var p = parameters[i];
-                  if (p.Type is IdentifierNameSyntax id &&
-                      string.Equals(id.Identifier.Text, "CancellationToken", StringComparison.Ordinal))
+                  if (parameters[i].Type is not IdentifierNameSyntax id ||
+                      !string.Equals(id.Identifier.Text, "CancellationToken", StringComparison.Ordinal))
                   {
-                     ctIndex = i;
-                     break;
+                     continue;
                   }
+
+                  ctIndex = i;
+                  break;
                }
 
                if (ctIndex < 0)
@@ -887,7 +711,6 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
                   return original;
                }
 
-               // Find params parameter
                var paramsIndex = -1;
                for (var i = 0; i < parameters.Count; i++)
                {
@@ -912,7 +735,6 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
                var ctSyntax = parameters[ctIndex];
                var withoutCt = parameters.RemoveAt(ctIndex);
 
-               // Recompute params index after removal
                var newParamsIndex = -1;
                for (var i = 0; i < withoutCt.Count; i++)
                {
@@ -959,8 +781,7 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
       var ctIndex = -1;
       for (var i = 0; i < parameters.Count; i++)
       {
-         var p = parameters[i];
-         if (!string.Equals(p.Identifier.Text, ctSymbol.Name, StringComparison.Ordinal))
+         if (!string.Equals(parameters[i].Identifier.Text, ctSymbol.Name, StringComparison.Ordinal))
          {
             continue;
          }
@@ -989,24 +810,25 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
       IMethodSymbol interfaceMethod,
       CancellationToken cancellationToken)
    {
-      // 1. Find CT parameter index on the interface
       var ctIndex = -1;
       for (var i = 0; i < interfaceMethod.Parameters.Length; i++)
       {
-         if (IsCancellationToken(interfaceMethod.Parameters[i].Type))
+         if (!interfaceMethod.Parameters[i]
+                             .Type
+                             .IsCancellationToken())
          {
-            ctIndex = i;
-            break;
+            continue;
          }
+
+         ctIndex = i;
+         break;
       }
 
       if (ctIndex < 0)
       {
-         // Interface no longer has CT? Nothing to do.
          return solution;
       }
 
-      // 2. Collect documentation IDs for the interface method and all implementations
       var methodIds = new List<string>();
 
       var interfaceId = interfaceMethod.GetDocumentationCommentId();
@@ -1018,7 +840,7 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
       var impls = await SymbolFinder.FindImplementationsAsync(
                                        interfaceMethod,
                                        solution,
-                                       projects: null,
+                                       null,
                                        cancellationToken)
                                     .ConfigureAwait(false);
 
@@ -1026,7 +848,7 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
       {
          if (impl.DeclaringSyntaxReferences.Length == 0)
          {
-            continue; // skip metadata-only
+            continue;
          }
 
          var id = impl.GetDocumentationCommentId();
@@ -1036,7 +858,6 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
          }
       }
 
-      // 3. Resolve each method symbol in the current solution and rename its CT param
       foreach (var methodId in methodIds)
       {
          IMethodSymbol? methodSymbol = null;
@@ -1069,12 +890,11 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
 
          if (ctIndex >= methodSymbol.Parameters.Length)
          {
-            // Signature drifted – be conservative.
             continue;
          }
 
          var p = methodSymbol.Parameters[ctIndex];
-         if (!IsCancellationToken(p.Type))
+         if (!p.Type.IsCancellationToken())
          {
             continue;
          }
@@ -1094,5 +914,66 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
       }
 
       return solution;
+   }
+
+   private static async Task<Dictionary<DocumentId, ImmutableArray<MethodDeclarationSyntax>>>
+      GetInterfaceAndImplementationDeclarationsAsync(Solution solution,
+         IMethodSymbol interfaceMethod,
+         CancellationToken cancellationToken)
+   {
+      var allMethods = ImmutableArray.CreateBuilder<IMethodSymbol>();
+      allMethods.Add(interfaceMethod);
+
+      var impls = await SymbolFinder.FindImplementationsAsync(
+                                       interfaceMethod,
+                                       solution,
+                                       null,
+                                       cancellationToken)
+                                    .ConfigureAwait(false);
+
+      foreach (var impl in impls.OfType<IMethodSymbol>())
+      {
+         if (impl.DeclaringSyntaxReferences.Length > 0)
+         {
+            allMethods.Add(impl);
+         }
+      }
+
+      var methodsByDocument = new Dictionary<DocumentId, ImmutableArray<MethodDeclarationSyntax>.Builder>();
+
+      foreach (var syntaxRef in allMethods.SelectMany(method => method.DeclaringSyntaxReferences))
+      {
+         var syntax = await syntaxRef.GetSyntaxAsync(cancellationToken)
+                                     .ConfigureAwait(false);
+
+         if (syntax is not MethodDeclarationSyntax methodDecl)
+         {
+            continue;
+         }
+
+         var doc = solution.GetDocument(methodDecl.SyntaxTree);
+         if (doc is null)
+         {
+            continue;
+         }
+
+         var docId = doc.Id;
+
+         if (!methodsByDocument.TryGetValue(docId, out var list))
+         {
+            list = ImmutableArray.CreateBuilder<MethodDeclarationSyntax>();
+            methodsByDocument[docId] = list;
+         }
+
+         list.Add(methodDecl);
+      }
+
+      var result = new Dictionary<DocumentId, ImmutableArray<MethodDeclarationSyntax>>();
+      foreach (var kvp in methodsByDocument)
+      {
+         result[kvp.Key] = kvp.Value.ToImmutable();
+      }
+
+      return result;
    }
 }

@@ -1,4 +1,5 @@
-﻿using System.Threading;
+﻿using System;
+using System.Threading;
 using System.Threading.Tasks;
 using MediatR;
 
@@ -8,10 +9,9 @@ public class MediatRequest : IRequest;
 
 public class MediatRequestHandler : IRequestHandler<MediatRequest>
 {
-   // This method should not be renamed to HandleAsync
-   
+   // Contract implementation – should not be renamed to HandleAsync or forced CT renames.
    public Task Handle(MediatRequest request, CancellationToken cancellationToken)
    {
-      throw new System.NotImplementedException();
+      throw new NotImplementedException();
    }
 }

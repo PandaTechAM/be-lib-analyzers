@@ -1,24 +1,27 @@
 // ReSharper disable UnusedType.Global
 // ReSharper disable UnusedMember.Global
 
+using System;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Http;
 
 namespace Analyzers.Sample.Async;
 
 public interface IOrderService
 {
-   // ✅ OK: name, return type, ct last + named ct
+   // OK: name, CT last, CT named ct
    Task<Order> GetOrderAsync(int id, CancellationToken ct);
 
-   // ❌ PT0001 (no Async suffix), ❌ PT0002 (no CT at all)
+   // PT0001 + PT0002: no Async suffix, no CancellationToken
    Task<Order> GetOrder(int id);
 
-   // ❌ PT0002 (CT is not last, name is wrong)
+   // PT0003 + PT0004: CT name wrong and not last
    Task<Order> GetOrderByCodeAsync(CancellationToken token, string code);
+
+   // OK: CT named ct, last non-params, default allowed
    Task<Order> GetSomethingAsync(CancellationToken ct = default, params string[] args);
+
+   // PT0002: no CT at all (only optional + params)
    Task<Order> GetMeAsync(int id = 5, params object[] args);
 }
 
@@ -26,83 +29,56 @@ public sealed class OrderService : IOrderService
 {
    public Task<Order> GetOrderAsync(int id, CancellationToken ct)
    {
+      ct.ThrowIfCancellationRequested();
       return Task.FromResult(new Order(id));
    }
 
    public Task<Order> GetOrder(int id)
    {
-      return Task.FromResult(new Order(id));
       // PT0001 + PT0002
+      return Task.FromResult(new Order(id));
    }
 
    public Task<Order> GetOrderByCodeAsync(CancellationToken token, string code)
    {
+      // PT0003 + PT0004
       return Task.FromResult(new Order(42));
-      // PT0002
    }
 
    public Task<Order> GetSomethingAsync(CancellationToken ct = default, params string[] args)
    {
       ct.ThrowIfCancellationRequested();
-      throw new System.NotImplementedException();
+      throw new NotImplementedException();
    }
 
    public Task<Order> GetMeAsync(int id = 5, params object[] args)
    {
-      throw new System.NotImplementedException();
+      throw new NotImplementedException();
    }
 }
 
-// Simulated controller-style class.
+// Simulated controller-style class (no interface / contracts)
 public sealed class OrdersController
 {
-   // ✅ OK
+   // OK
    public static Task<Order> GetOrderAsync(int id, CancellationToken ct)
    {
+      ct.ThrowIfCancellationRequested();
       return Task.FromResult(new Order(id));
    }
 
-   // ❌ PT0001 (no Async suffix)
+   // PT0001: no Async suffix
    public Task<Order> GetOrder(int id, CancellationToken ct)
    {
+      ct.ThrowIfCancellationRequested();
       return Task.FromResult(new Order(id));
    }
 
-   // ❌ PT0002 (CT not last)
+   // PT0004: CT not last
    public Task<Order> GetOrderDetailsAsync(CancellationToken ct, int id)
    {
+      ct.ThrowIfCancellationRequested();
       return Task.FromResult(new Order(id));
-   }
-}
-
-// Minimal API style sample.
-public static class OrderEndpoints
-{
-   public static void MapOrderEndpoints(WebApplication app)
-   {
-      // ✅ OK: ct last, Task<Order>
-      app.MapGet("/orders/{id:int}",
-         async (int id, CancellationToken ct) =>
-         {
-            await Task.Delay(10, ct);
-            return Results.Ok(new Order(id));
-         });
-
-      // ❌ PT0002: missing CT parameter
-      app.MapGet("/orders/no-ct/{id:int}",
-         async (int id) =>
-         {
-            await Task.Delay(10);
-            return Results.Ok(new Order(id));
-         });
-
-      // ❌ PT0002: CT name is wrong + not last
-      app.MapGet("/orders/bad-ct/{id:int}",
-         async (CancellationToken token, int id) =>
-         {
-            await Task.Delay(10, token);
-            return Results.Ok(new Order(id));
-         });
    }
 }
 
