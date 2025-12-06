@@ -18,7 +18,7 @@
         <PackageId>Pandatech.Analyzers</PackageId>
         <PackageIcon>pandatech.png</PackageIcon>
         <PackageReadmeFile>Readme.md</PackageReadmeFile>
-        <Version>1.3.0</Version>
+        <Version>1.4.0</Version>
         <Authors>Pandatech</Authors>
         <Description>Pandatech Roslyn analyzers enforcing company coding rules.</Description>
         <PackageLicenseExpression>MIT</PackageLicenseExpression>
