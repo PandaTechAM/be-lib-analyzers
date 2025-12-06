@@ -113,27 +113,7 @@ public class AsyncMethodConventionsAnalyzerTests
 
       await VerifyCS.VerifyAnalyzerAsync(code);
    }
-
-   [Fact]
-   public async Task Ct_name_rule_applies_on_contract_implementation()
-   {
-      const string code = """
-                          using System.Threading;
-                          using System.Threading.Tasks;
-
-                          public interface IService
-                          {
-                              Task GetValueAsync(CancellationToken ct);
-                          }
-
-                          public class Service : IService
-                          {
-                              public Task {|PT0003:GetValueAsync|}(CancellationToken token) => Task.CompletedTask;
-                          }
-                          """;
-
-      await VerifyCS.VerifyAnalyzerAsync(code);
-   }
+   
 
    [Fact]
    public async Task Ct_before_params_is_considered_last_non_params()

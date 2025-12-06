@@ -989,7 +989,7 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
       IMethodSymbol interfaceMethod,
       CancellationToken cancellationToken)
    {
-      // 1. Find CT parameter ordinal on the interface
+      // 1. Find CT parameter index on the interface
       var ctIndex = -1;
       for (var i = 0; i < interfaceMethod.Parameters.Length; i++)
       {
@@ -1006,9 +1006,14 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
          return solution;
       }
 
-      // 2. Collect interface + implementing methods
-      var allMethods = ImmutableArray.CreateBuilder<IMethodSymbol>();
-      allMethods.Add(interfaceMethod);
+      // 2. Collect documentation IDs for the interface method and all implementations
+      var methodIds = new List<string>();
+
+      var interfaceId = interfaceMethod.GetDocumentationCommentId();
+      if (!string.IsNullOrEmpty(interfaceId))
+      {
+         methodIds.Add(interfaceId!);
+      }
 
       var impls = await SymbolFinder.FindImplementationsAsync(
                                        interfaceMethod,
@@ -1019,92 +1024,73 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
 
       foreach (var impl in impls.OfType<IMethodSymbol>())
       {
-         if (impl.DeclaringSyntaxReferences.Length > 0)
+         if (impl.DeclaringSyntaxReferences.Length == 0)
          {
-            allMethods.Add(impl);
+            continue; // skip metadata-only
+         }
+
+         var id = impl.GetDocumentationCommentId();
+         if (!string.IsNullOrEmpty(id))
+         {
+            methodIds.Add(id!);
          }
       }
 
-      // 3. Group by document
-      var methodsByDocument = new Dictionary<DocumentId, ImmutableArray<MethodDeclarationSyntax>.Builder>();
-
-      foreach (var method in allMethods)
+      // 3. Resolve each method symbol in the current solution and rename its CT param
+      foreach (var methodId in methodIds)
       {
-         foreach (var syntaxRef in method.DeclaringSyntaxReferences)
+         IMethodSymbol? methodSymbol = null;
+
+         foreach (var project in solution.Projects)
          {
-            var syntax = await syntaxRef.GetSyntaxAsync(cancellationToken)
-                                        .ConfigureAwait(false);
-            if (syntax is not MethodDeclarationSyntax methodDecl)
+            var compilation = await project.GetCompilationAsync(cancellationToken)
+                                           .ConfigureAwait(false);
+            if (compilation is null)
             {
                continue;
             }
 
-            var doc = solution.GetDocument(methodDecl.SyntaxTree);
-            if (doc is null)
+            var symbol = DocumentationCommentId.GetFirstSymbolForDeclarationId(methodId, compilation)
+               as IMethodSymbol;
+
+            if (symbol is null)
             {
                continue;
             }
 
-            var docId = doc.Id;
-            if (!methodsByDocument.TryGetValue(docId, out var list))
-            {
-               list = ImmutableArray.CreateBuilder<MethodDeclarationSyntax>();
-               methodsByDocument[docId] = list;
-            }
-
-            list.Add(methodDecl);
+            methodSymbol = symbol;
+            break;
          }
-      }
 
-      // 4. Rewrite name in each method declaration at the same ordinal
-      foreach (var kvp in methodsByDocument)
-      {
-         var docId = kvp.Key;
-         var methodDecls = kvp.Value.ToImmutable();
-
-         var document = solution.GetDocument(docId);
-         if (document is null)
+         if (methodSymbol is null)
          {
             continue;
          }
 
-         var root = await document.GetSyntaxRootAsync(cancellationToken)
-                                  .ConfigureAwait(false);
-         if (root is null)
+         if (ctIndex >= methodSymbol.Parameters.Length)
+         {
+            // Signature drifted – be conservative.
+            continue;
+         }
+
+         var p = methodSymbol.Parameters[ctIndex];
+         if (!IsCancellationToken(p.Type))
          {
             continue;
          }
 
-         var newRoot = root.ReplaceNodes(
-            methodDecls,
-            (original, _) =>
-            {
-               var parameters = original.ParameterList.Parameters;
-               if (ctIndex < 0 || ctIndex >= parameters.Count)
-               {
-                  // Signature drifted; be conservative.
-                  return original;
-               }
+         if (string.Equals(p.Name, "ct", StringComparison.Ordinal))
+         {
+            continue;
+         }
 
-               var ctParamSyntax = parameters[ctIndex];
-
-               // If it's already 'ct', no change needed.
-               if (ctParamSyntax.Identifier.Text == "ct")
-               {
-                  return original;
-               }
-
-               var newCtParamSyntax = ctParamSyntax.WithIdentifier(
-                  SyntaxFactory.Identifier("ct")
-                               .WithTriviaFrom(ctParamSyntax.Identifier));
-
-               var newParameters = parameters.Replace(ctParamSyntax, newCtParamSyntax);
-
-               return original.WithParameterList(
-                  original.ParameterList.WithParameters(newParameters));
-            });
-
-         solution = solution.WithDocumentSyntaxRoot(docId, newRoot);
+         solution = await Renamer.RenameSymbolAsync(
+                                    solution,
+                                    p,
+                                    new SymbolRenameOptions(),
+                                    "ct",
+                                    cancellationToken)
+                                 .ConfigureAwait(false);
       }
 
       return solution;
