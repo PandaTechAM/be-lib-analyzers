@@ -224,10 +224,22 @@ public sealed class AsyncMethodConventionsAnalyzer : DiagnosticAnalyzer
       }
 
       var isNamedCt = string.Equals(ctParam.Name, "ct", StringComparison.Ordinal);
-      var isLast = ctParam.Ordinal == parameters.Length - 1;
+
+      // "Last" means: last non-params parameter (params must stay physically last)
+      var lastNonParamsIndex = -1;
+      for (var i = 0; i < parameters.Length; i++)
+      {
+         if (!parameters[i].IsParams)
+         {
+            lastNonParamsIndex = i;
+         }
+      }
+
+      var isLast = ctParam.Ordinal == lastNonParamsIndex;
 
       return new CtInfo(true, isNamedCt, isLast, ctParam.Name);
    }
+
 
    private readonly struct CtInfo(bool hasCt, bool isNamedCt, bool isLast, string name)
    {
