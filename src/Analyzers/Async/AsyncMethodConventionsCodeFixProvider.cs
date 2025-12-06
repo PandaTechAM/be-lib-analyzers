@@ -214,6 +214,31 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
 
          case AsyncMethodConventionsAnalyzer.CancellationTokenNameId:
          {
+            var isInterfaceMethod = methodSymbol.ContainingType?.TypeKind == TypeKind.Interface;
+
+            if (isInterfaceMethod)
+            {
+               const string title = "Rename CancellationToken parameter to 'ct' (interface and implementations)";
+
+               context.RegisterCodeFix(
+                  CodeAction.Create(
+                     title,
+                     c => RenameCancellationTokenForInterfaceAndImplementationsAsync(
+                        context.Document.Project.Solution,
+                        methodSymbol,
+                        c),
+                     "RenameCt_InterfaceAndImpls"),
+                  diagnostic);
+
+               return;
+            }
+
+            // Non-interface method: simple symbol rename
+            if (string.Equals(ctParam.Name, "ct", StringComparison.Ordinal))
+            {
+               return;
+            }
+
             var renameTitle = $"Rename '{ctParam.Name}' to 'ct'";
 
             context.RegisterCodeFix(
@@ -958,5 +983,130 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
 
       var newRoot = root.ReplaceNode(parenthesized, newLambda);
       return document.WithSyntaxRoot(newRoot);
+   }
+
+   private static async Task<Solution> RenameCancellationTokenForInterfaceAndImplementationsAsync(Solution solution,
+      IMethodSymbol interfaceMethod,
+      CancellationToken cancellationToken)
+   {
+      // 1. Find CT parameter ordinal on the interface
+      var ctIndex = -1;
+      for (var i = 0; i < interfaceMethod.Parameters.Length; i++)
+      {
+         if (IsCancellationToken(interfaceMethod.Parameters[i].Type))
+         {
+            ctIndex = i;
+            break;
+         }
+      }
+
+      if (ctIndex < 0)
+      {
+         // Interface no longer has CT? Nothing to do.
+         return solution;
+      }
+
+      // 2. Collect interface + implementing methods
+      var allMethods = ImmutableArray.CreateBuilder<IMethodSymbol>();
+      allMethods.Add(interfaceMethod);
+
+      var impls = await SymbolFinder.FindImplementationsAsync(
+                                       interfaceMethod,
+                                       solution,
+                                       projects: null,
+                                       cancellationToken)
+                                    .ConfigureAwait(false);
+
+      foreach (var impl in impls.OfType<IMethodSymbol>())
+      {
+         if (impl.DeclaringSyntaxReferences.Length > 0)
+         {
+            allMethods.Add(impl);
+         }
+      }
+
+      // 3. Group by document
+      var methodsByDocument = new Dictionary<DocumentId, ImmutableArray<MethodDeclarationSyntax>.Builder>();
+
+      foreach (var method in allMethods)
+      {
+         foreach (var syntaxRef in method.DeclaringSyntaxReferences)
+         {
+            var syntax = await syntaxRef.GetSyntaxAsync(cancellationToken)
+                                        .ConfigureAwait(false);
+            if (syntax is not MethodDeclarationSyntax methodDecl)
+            {
+               continue;
+            }
+
+            var doc = solution.GetDocument(methodDecl.SyntaxTree);
+            if (doc is null)
+            {
+               continue;
+            }
+
+            var docId = doc.Id;
+            if (!methodsByDocument.TryGetValue(docId, out var list))
+            {
+               list = ImmutableArray.CreateBuilder<MethodDeclarationSyntax>();
+               methodsByDocument[docId] = list;
+            }
+
+            list.Add(methodDecl);
+         }
+      }
+
+      // 4. Rewrite name in each method declaration at the same ordinal
+      foreach (var kvp in methodsByDocument)
+      {
+         var docId = kvp.Key;
+         var methodDecls = kvp.Value.ToImmutable();
+
+         var document = solution.GetDocument(docId);
+         if (document is null)
+         {
+            continue;
+         }
+
+         var root = await document.GetSyntaxRootAsync(cancellationToken)
+                                  .ConfigureAwait(false);
+         if (root is null)
+         {
+            continue;
+         }
+
+         var newRoot = root.ReplaceNodes(
+            methodDecls,
+            (original, _) =>
+            {
+               var parameters = original.ParameterList.Parameters;
+               if (ctIndex < 0 || ctIndex >= parameters.Count)
+               {
+                  // Signature drifted; be conservative.
+                  return original;
+               }
+
+               var ctParamSyntax = parameters[ctIndex];
+
+               // If it's already 'ct', no change needed.
+               if (ctParamSyntax.Identifier.Text == "ct")
+               {
+                  return original;
+               }
+
+               var newCtParamSyntax = ctParamSyntax.WithIdentifier(
+                  SyntaxFactory.Identifier("ct")
+                               .WithTriviaFrom(ctParamSyntax.Identifier));
+
+               var newParameters = parameters.Replace(ctParamSyntax, newCtParamSyntax);
+
+               return original.WithParameterList(
+                  original.ParameterList.WithParameters(newParameters));
+            });
+
+         solution = solution.WithDocumentSyntaxRoot(docId, newRoot);
+      }
+
+      return solution;
    }
 }
