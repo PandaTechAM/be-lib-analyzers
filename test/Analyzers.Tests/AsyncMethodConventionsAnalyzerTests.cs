@@ -113,7 +113,7 @@ public class AsyncMethodConventionsAnalyzerTests
 
       await VerifyCS.VerifyAnalyzerAsync(code);
    }
-   
+
 
    [Fact]
    public async Task Ct_before_params_is_considered_last_non_params()

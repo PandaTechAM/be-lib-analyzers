@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Immutable;
+using System.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.Diagnostics;
 using Microsoft.CodeAnalysis.Operations;
@@ -60,8 +61,6 @@ public sealed class AsyncMethodConventionsAnalyzer : DiagnosticAnalyzer
       context.ConfigureGeneratedCodeAnalysis(GeneratedCodeAnalysisFlags.None);
 
       context.RegisterSymbolAction(AnalyzeMethod, SymbolKind.Method);
-      context.RegisterOperationAction(AnalyzeAnonymousFunction, OperationKind.AnonymousFunction);
-
       context.RegisterOperationAction(AnalyzeMinimalApiInvocation, OperationKind.Invocation);
    }
 
@@ -79,7 +78,6 @@ public sealed class AsyncMethodConventionsAnalyzer : DiagnosticAnalyzer
          return;
       }
 
-      // Only analyze methods declared in source (skip metadata / external assemblies).
       var hasSourceLocation = false;
       foreach (var location in method.Locations)
       {
@@ -97,14 +95,12 @@ public sealed class AsyncMethodConventionsAnalyzer : DiagnosticAnalyzer
          return;
       }
 
-      if (method.ReturnType is not INamedTypeSymbol returnType)
+      if (!method.IsAsync)
       {
-         return;
-      }
-
-      if (!IsTaskLike(returnType))
-      {
-         return;
+         if (method.ReturnType is not INamedTypeSymbol returnType || !returnType.IsTaskLike())
+         {
+            return;
+         }
       }
 
       AnalyzeAsyncMember(
@@ -114,41 +110,96 @@ public sealed class AsyncMethodConventionsAnalyzer : DiagnosticAnalyzer
          context.ReportDiagnostic);
    }
 
-   private static void AnalyzeAnonymousFunction(OperationAnalysisContext context)
+   private static void AnalyzeAsyncMember(IMethodSymbol method,
+      Location location,
+      string displayName,
+      Action<Diagnostic> report)
    {
-      var anon = (IAnonymousFunctionOperation)context.Operation;
-      var symbol = anon.Symbol;
+      var isContract = method.IsContractImplementation();
+      var isTest = method.IsTestMethod();
+      var isMiddleware = method.IsMiddleware();
 
-      // Only Task / ValueTask
-      if (symbol.ReturnType is not INamedTypeSymbol returnType)
+      var skipCtMissingAndPosition = isContract || isTest || isMiddleware;
+
+      if (!displayName.Equals("anonymous function", StringComparison.Ordinal) &&
+          !displayName.EndsWith("Async", StringComparison.Ordinal) &&
+          !isContract)
       {
-         return;
+         report(Diagnostic.Create(AsyncSuffixRule, location, displayName));
       }
 
-      if (!IsTaskLike(returnType))
-      {
-         return;
-      }
+      var ctInfo = GetCancellationTokenInfo(method);
 
-      // For lambdas/anonymous functions we do NOT enforce "must have CT" (PT0002),
-      // because the delegate signature is usually dictated by an external API.
-      // We only normalize name and position if a CT parameter already exists.
-      var ctInfo = GetCancellationTokenInfo(symbol);
       if (!ctInfo.HasCt)
       {
+         if (!skipCtMissingAndPosition)
+         {
+            report(Diagnostic.Create(CancellationTokenMissingRule, location, displayName));
+         }
+
          return;
       }
 
-      // If the lambda is inside a test method, skip CT name/position completely.
-      if (IsInsideTestMethod(anon))
+      if (!ctInfo.IsNamedCt && !isContract && !isMiddleware)
+      {
+         report(Diagnostic.Create(CancellationTokenNameRule, location, displayName, ctInfo.Name));
+      }
+
+      if (!ctInfo.IsLast && !skipCtMissingAndPosition)
+      {
+         report(Diagnostic.Create(CancellationTokenPositionRule, location, displayName, ctInfo.Name));
+      }
+   }
+
+   private static void AnalyzeMinimalApiInvocation(OperationAnalysisContext context)
+   {
+      var invocation = (IInvocationOperation)context.Operation;
+      var target = invocation.TargetMethod;
+
+      if (!target.IsMinimalApiMapMethod())
       {
          return;
       }
 
-      const string displayName = "anonymous function";
-      var location = anon.Syntax.GetLocation();
+      IAnonymousFunctionOperation? handlerAnon = null;
 
-      // PT0003: name must be ct
+      foreach (var arg in invocation.Arguments)
+      {
+         handlerAnon = AsyncHelpers.ExtractAnonymousFunction(arg.Value);
+         if (handlerAnon is not null)
+         {
+            break;
+         }
+      }
+
+      if (handlerAnon is null)
+      {
+         return;
+      }
+
+      var handlerSymbol = handlerAnon.Symbol;
+
+      if (handlerSymbol.ReturnType is not INamedTypeSymbol returnType ||
+          !returnType.IsTaskLike())
+      {
+         return;
+      }
+
+      var ctInfo = GetCancellationTokenInfo(handlerSymbol);
+      const string displayName = "anonymous function";
+      var location = handlerAnon.Syntax.GetLocation();
+
+      if (!ctInfo.HasCt)
+      {
+         context.ReportDiagnostic(
+            Diagnostic.Create(
+               CancellationTokenMissingRule,
+               location,
+               displayName));
+
+         return;
+      }
+
       if (!ctInfo.IsNamedCt)
       {
          context.ReportDiagnostic(
@@ -159,7 +210,6 @@ public sealed class AsyncMethodConventionsAnalyzer : DiagnosticAnalyzer
                ctInfo.Name));
       }
 
-      // PT0004: CT must be last non-params parameter
       if (!ctInfo.IsLast)
       {
          context.ReportDiagnostic(
@@ -171,134 +221,11 @@ public sealed class AsyncMethodConventionsAnalyzer : DiagnosticAnalyzer
       }
    }
 
-
-   private static void AnalyzeAsyncMember(IMethodSymbol method,
-      Location location,
-      string displayName,
-      Action<Diagnostic> report)
-   {
-      var isContract = method.IsContractImplementation();
-      var isTest = IsTestMethod(method);
-
-      // For CT missing / position we skip both contracts and tests.
-      var skipCtMissingAndPosition = isContract || isTest;
-
-      // PT0001 – name must end with Async (for named methods),
-      // but we DO NOT enforce it on contract implementations (MediatR Handle, overrides, etc.).
-      if (!displayName.Equals("anonymous function", StringComparison.Ordinal) &&
-          !displayName.EndsWith("Async", StringComparison.Ordinal) &&
-          !isContract)
-      {
-         report(Diagnostic.Create(AsyncSuffixRule, location, displayName));
-      }
-
-      var ctInfo = GetCancellationTokenInfo(method);
-
-      // PT0002 – missing CancellationToken
-      // Only enforced on non-contract, non-test methods.
-      if (!ctInfo.HasCt)
-      {
-         if (!skipCtMissingAndPosition)
-         {
-            report(Diagnostic.Create(CancellationTokenMissingRule, location, displayName));
-         }
-
-         return;
-      }
-
-      // PT0003 – name must be ct
-      // Enforced only on non-contract methods (including tests, per "maybe maximum naming").
-      if (!ctInfo.IsNamedCt && !isContract)
-      {
-         report(Diagnostic.Create(CancellationTokenNameRule, location, displayName, ctInfo.Name));
-      }
-
-      // PT0004 – CT must be last
-      // Only enforced on non-contract, non-test methods.
-      if (!ctInfo.IsLast && !skipCtMissingAndPosition)
-      {
-         report(Diagnostic.Create(CancellationTokenPositionRule, location, displayName, ctInfo.Name));
-      }
-   }
-
-   private static bool IsTaskLike(INamedTypeSymbol type)
-   {
-      if (type.ContainingNamespace.ToDisplayString() != "System.Threading.Tasks")
-      {
-         return false;
-      }
-
-      return type.Name is "Task" or "ValueTask";
-   }
-
-   private static bool IsTestMethod(IMethodSymbol method)
-   {
-      foreach (var attr in method.GetAttributes())
-      {
-         var attrClass = attr.AttributeClass;
-         if (attrClass is null)
-         {
-            continue;
-         }
-
-         var name = attrClass.Name;
-
-         if (name.EndsWith("Attribute", StringComparison.Ordinal))
-         {
-            name = name.Substring(0, name.Length - "Attribute".Length);
-         }
-
-         if (name is "Fact"
-             or "Theory"
-             or "Test"
-             or "TestCase"
-             or "TestMethod"
-             or "DataTestMethod")
-         {
-            return true;
-         }
-      }
-
-      return false;
-   }
-
-
-   private static bool IsInsideTestMethod(IAnonymousFunctionOperation anon)
-   {
-      if (anon.Symbol.ContainingSymbol is IMethodSymbol method)
-      {
-         return IsTestMethod(method);
-      }
-
-      return false;
-   }
-
-
    private static CtInfo GetCancellationTokenInfo(IMethodSymbol method)
    {
-      IParameterSymbol? ctParam = null;
       var parameters = method.Parameters;
 
-      foreach (var p in parameters)
-      {
-         if (p.Type is not INamedTypeSymbol named)
-         {
-            continue;
-         }
-
-         if (named.Name != "CancellationToken")
-         {
-            continue;
-         }
-
-         if (named.ContainingNamespace.ToDisplayString() != "System.Threading")
-         {
-            continue;
-         }
-
-         ctParam = p;
-         break;
-      }
+      var ctParam = Enumerable.FirstOrDefault(parameters, p => p.Type.IsCancellationToken());
 
       if (ctParam is null)
       {
@@ -307,7 +234,6 @@ public sealed class AsyncMethodConventionsAnalyzer : DiagnosticAnalyzer
 
       var isNamedCt = string.Equals(ctParam.Name, "ct", StringComparison.Ordinal);
 
-      // "Last" means: last non-params parameter (params must stay physically last)
       var lastNonParamsIndex = -1;
       for (var i = 0; i < parameters.Length; i++)
       {
@@ -320,130 +246,6 @@ public sealed class AsyncMethodConventionsAnalyzer : DiagnosticAnalyzer
       var isLast = ctParam.Ordinal == lastNonParamsIndex;
 
       return new CtInfo(true, isNamedCt, isLast, ctParam.Name);
-   }
-
-   private static void AnalyzeMinimalApiInvocation(OperationAnalysisContext context)
-   {
-      var invocation = (IInvocationOperation)context.Operation;
-      var target = invocation.TargetMethod;
-
-      // 1. Is this one of the Minimal API Map* extension methods?
-      if (!IsMinimalApiMapMethod(target))
-      {
-         return;
-      }
-
-      // 2. Find the handler lambda inside the arguments.
-      //    We do NOT rely on arg.Parameter.Type (which is often System.Delegate).
-      IAnonymousFunctionOperation? handlerAnon = null;
-
-      foreach (var arg in invocation.Arguments)
-      {
-         handlerAnon = ExtractAnonymousFunction(arg.Value);
-         if (handlerAnon is not null)
-         {
-            break;
-         }
-      }
-
-      if (handlerAnon is null)
-      {
-         // Handler is a method group or something non-lambda; skip.
-         return;
-      }
-
-      var handlerSymbol = handlerAnon.Symbol;
-
-      // Must be Task/ValueTask-based handler.
-      if (handlerSymbol.ReturnType is not INamedTypeSymbol returnType ||
-          !IsTaskLike(returnType))
-      {
-         return;
-      }
-
-      // 3. Enforce: minimal API handler must have a CancellationToken parameter.
-      var ctInfo = GetCancellationTokenInfo(handlerSymbol);
-      if (ctInfo.HasCt)
-      {
-         // If CT already exists, PT0003/PT0004 are handled by AnalyzeAnonymousFunction.
-         return;
-      }
-
-      const string displayName = "anonymous function";
-
-      context.ReportDiagnostic(
-         Diagnostic.Create(
-            CancellationTokenMissingRule,
-            handlerAnon.Syntax.GetLocation(),
-            displayName));
-   }
-
-
-   private static bool IsMinimalApiMapMethod(IMethodSymbol method)
-   {
-      if (!method.IsExtensionMethod)
-      {
-         return false;
-      }
-
-      // EndpointRouteBuilderExtensions.MapGet / MapPost / MapPut / MapDelete / MapMethods / ...
-      var containingType = method.ContainingType;
-      if (containingType is null)
-      {
-         return false;
-      }
-
-      if (!string.Equals(containingType.Name, "EndpointRouteBuilderExtensions", StringComparison.Ordinal))
-      {
-         return false;
-      }
-
-      var ns = containingType.ContainingNamespace.ToDisplayString();
-      if (!ns.StartsWith("Microsoft.AspNetCore.Builder", StringComparison.Ordinal))
-      {
-         return false;
-      }
-
-      // Limit to the typical Map* names
-      return method.Name is
-         "MapGet" or
-         "MapPost" or
-         "MapPut" or
-         "MapDelete" or
-         "MapPatch" or
-         "MapHead" or
-         "MapOptions" or
-         "MapTrace" or
-         "MapMethods";
-   }
-
-
-   private static IAnonymousFunctionOperation? ExtractAnonymousFunction(IOperation value)
-   {
-      while (true)
-      {
-         switch (value)
-         {
-            case IAnonymousFunctionOperation anon:
-               return anon;
-
-            case IDelegateCreationOperation
-            {
-               Target: IAnonymousFunctionOperation anon
-            }:
-               return anon;
-
-            case IConversionOperation
-            {
-               Operand: var operand
-            }:
-               value = operand;
-               continue;
-
-            default:
-               return null;
-         }
-      }
    }
 
    private readonly struct CtInfo(bool hasCt, bool isNamedCt, bool isLast, string name)
