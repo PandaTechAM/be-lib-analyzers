@@ -149,22 +149,43 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
          return;
       }
 
+      var isInterfaceMethod = methodSymbol.ContainingType?.TypeKind == TypeKind.Interface;
+      var isVirtualOrAbstract = methodSymbol.IsVirtualOrAbstract();
+      var methodId = methodSymbol.GetDocumentationCommentId();
+
+      if (string.IsNullOrEmpty(methodId))
+      {
+         return;
+      }
+
       if (diagnosticId == AsyncMethodConventionsAnalyzer.CancellationTokenMissingId)
       {
          const string title = "Add CancellationToken ct parameter";
-
-         var isInterfaceMethod = methodSymbol.ContainingType?.TypeKind == TypeKind.Interface;
 
          if (isInterfaceMethod)
          {
             context.RegisterCodeFix(
                CodeAction.Create(
                   title,
-                  c => AddCancellationTokenForInterfaceAndImplementationsAsync(
+                  c => AddCancellationTokenForHierarchyAsync(
                      context.Document.Project.Solution,
-                     methodSymbol,
+                     methodId!,
+                     MethodHierarchyKind.Interface,
                      c),
                   "AddCtParameter_InterfaceAndImpls"),
+               diagnostic);
+         }
+         else if (isVirtualOrAbstract)
+         {
+            context.RegisterCodeFix(
+               CodeAction.Create(
+                  title,
+                  c => AddCancellationTokenForHierarchyAsync(
+                     context.Document.Project.Solution,
+                     methodId!,
+                     MethodHierarchyKind.Virtual,
+                     c),
+                  "AddCtParameter_VirtualAndOverrides"),
                diagnostic);
          }
          else
@@ -194,7 +215,7 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
 
          case AsyncMethodConventionsAnalyzer.CancellationTokenNameId:
          {
-            var isInterfaceMethod = methodSymbol.ContainingType?.TypeKind == TypeKind.Interface;
+            var ctIndex = ctParam.Ordinal;
 
             if (isInterfaceMethod)
             {
@@ -203,9 +224,11 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
                context.RegisterCodeFix(
                   CodeAction.Create(
                      title,
-                     c => RenameCancellationTokenForInterfaceAndImplementationsAsync(
+                     c => RenameCancellationTokenForHierarchyAsync(
                         context.Document.Project.Solution,
-                        methodSymbol,
+                        methodId!,
+                        ctIndex,
+                        MethodHierarchyKind.Interface,
                         c),
                      "RenameCt_InterfaceAndImpls"),
                   diagnostic);
@@ -213,8 +236,22 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
                return;
             }
 
-            if (string.Equals(ctParam.Name, "ct", StringComparison.Ordinal))
+            if (isVirtualOrAbstract)
             {
+               const string title = "Rename CancellationToken parameter to 'ct' (base and overrides)";
+
+               context.RegisterCodeFix(
+                  CodeAction.Create(
+                     title,
+                     c => RenameCancellationTokenForHierarchyAsync(
+                        context.Document.Project.Solution,
+                        methodId!,
+                        ctIndex,
+                        MethodHierarchyKind.Virtual,
+                        c),
+                     "RenameCt_VirtualAndOverrides"),
+                  diagnostic);
+
                return;
             }
 
@@ -238,18 +275,31 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
             }
 
             const string moveTitle = "Move CancellationToken parameter to last position";
-            var isInterfaceMethod = methodSymbol.ContainingType?.TypeKind == TypeKind.Interface;
 
             if (isInterfaceMethod)
             {
                context.RegisterCodeFix(
                   CodeAction.Create(
                      moveTitle,
-                     c => MoveCancellationTokenToLastForInterfaceAndImplementationsAsync(
+                     c => MoveCancellationTokenToLastForHierarchyAsync(
                         context.Document.Project.Solution,
-                        methodSymbol,
+                        methodId!,
+                        MethodHierarchyKind.Interface,
                         c),
                      "MoveCtParameterLast_InterfaceAndImpls"),
+                  diagnostic);
+            }
+            else if (isVirtualOrAbstract)
+            {
+               context.RegisterCodeFix(
+                  CodeAction.Create(
+                     moveTitle,
+                     c => MoveCancellationTokenToLastForHierarchyAsync(
+                        context.Document.Project.Solution,
+                        methodId!,
+                        MethodHierarchyKind.Virtual,
+                        c),
+                     "MoveCtParameterLast_VirtualAndOverrides"),
                   diagnostic);
             }
             else
@@ -380,39 +430,11 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
          return document;
       }
 
-      var newRoot = compilationUnit;
-
-      if (!compilationUnit.HasUsing("System.Threading"))
-      {
-         var usingDirective = SyntaxFactory.UsingDirective(
-                                              SyntaxFactory.ParseName("System.Threading"))
-                                           .WithTrailingTrivia(SyntaxFactory.ElasticCarriageReturnLineFeed);
-
-         newRoot = newRoot.AddUsings(usingDirective);
-      }
-
+      var newRoot = EnsureUsingDirective(compilationUnit);
       var parameters = methodDecl.ParameterList.Parameters;
 
-      var ctType = SyntaxFactory.IdentifierName("CancellationToken");
-      var ctParam = SyntaxFactory.Parameter(SyntaxFactory.Identifier("ct"))
-                                 .WithType(ctType)
-                                 .WithDefault(
-                                    SyntaxFactory.EqualsValueClause(
-                                       SyntaxFactory.LiteralExpression(SyntaxKind.DefaultLiteralExpression)));
-
-      var insertIndex = parameters.Count;
-      for (var i = 0; i < parameters.Count; i++)
-      {
-         if (!parameters[i]
-              .Modifiers
-              .Any(SyntaxKind.ParamsKeyword))
-         {
-            continue;
-         }
-
-         insertIndex = i;
-         break;
-      }
+      var ctParam = CreateCancellationTokenParameter();
+      var insertIndex = GetInsertIndexBeforeParams(parameters);
 
       var newParameters = parameters.Insert(insertIndex, ctParam);
       var newMethod = methodDecl.WithParameterList(
@@ -429,68 +451,20 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
    {
       var parameters = methodDecl.ParameterList.Parameters;
 
-      var ctIndex = -1;
-      for (var i = 0; i < parameters.Count; i++)
-      {
-         if (!string.Equals(parameters[i].Identifier.Text, ctSymbol.Name, StringComparison.Ordinal))
-         {
-            continue;
-         }
-
-         ctIndex = i;
-         break;
-      }
-
+      var ctIndex = FindParameterIndex(parameters, ctSymbol.Name);
       if (ctIndex < 0)
       {
          return document;
       }
 
-      var paramsIndex = -1;
-      for (var i = 0; i < parameters.Count; i++)
-      {
-         if (!parameters[i]
-              .Modifiers
-              .Any(SyntaxKind.ParamsKeyword))
-         {
-            continue;
-         }
+      var paramsIndex = FindParamsIndex(parameters);
 
-         paramsIndex = i;
-         break;
-      }
-
-      var alreadyCorrect =
-         (paramsIndex < 0 && ctIndex == parameters.Count - 1) ||
-         (paramsIndex >= 0 && ctIndex == paramsIndex - 1);
-
-      if (alreadyCorrect)
+      if (IsAlreadyInCorrectPosition(ctIndex, parameters.Count, paramsIndex))
       {
          return document;
       }
 
-      var ctSyntax = parameters[ctIndex];
-      var withoutCt = parameters.RemoveAt(ctIndex);
-
-      var newParamsIndex = -1;
-      for (var i = 0; i < withoutCt.Count; i++)
-      {
-         if (!withoutCt[i]
-              .Modifiers
-              .Any(SyntaxKind.ParamsKeyword))
-         {
-            continue;
-         }
-
-         newParamsIndex = i;
-         break;
-      }
-
-      var newParameters =
-         newParamsIndex >= 0
-            ? withoutCt.Insert(newParamsIndex, ctSyntax)
-            : withoutCt.Add(ctSyntax);
-
+      var newParameters = MoveParameterToEnd(parameters, ctIndex, paramsIndex);
       var newMethod = methodDecl.WithParameterList(
          methodDecl.ParameterList.WithParameters(newParameters));
 
@@ -521,7 +495,6 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
          case ParenthesizedLambdaExpressionSyntax parenthesized:
          {
             var parameters = parenthesized.ParameterList.Parameters;
-
             var first = parameters.FirstOrDefault();
             var explicitParams = first is { Type: not null };
 
@@ -532,7 +505,6 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
             }
 
             var newParameters = parameters.Add(ctParam);
-
             var newLambda = parenthesized.WithParameterList(
                parenthesized.ParameterList.WithParameters(newParameters));
 
@@ -551,10 +523,7 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
             }
 
             var paramList = SyntaxFactory.ParameterList(
-               SyntaxFactory.SeparatedList([
-                  simple.Parameter,
-                  ctParam
-               ]));
+               SyntaxFactory.SeparatedList([simple.Parameter, ctParam]));
 
             var newLambda = SyntaxFactory.ParenthesizedLambdaExpression(paramList, simple.Body)
                                          .WithAttributeLists(simple.AttributeLists)
@@ -569,198 +538,6 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
          default:
             return document;
       }
-   }
-
-   private static async Task<Solution> AddCancellationTokenForInterfaceAndImplementationsAsync(Solution solution,
-      IMethodSymbol interfaceMethod,
-      CancellationToken cancellationToken)
-   {
-      var methodsByDocument = await GetInterfaceAndImplementationDeclarationsAsync(
-            solution,
-            interfaceMethod,
-            cancellationToken)
-         .ConfigureAwait(false);
-
-      foreach (var kvp in methodsByDocument)
-      {
-         var docId = kvp.Key;
-         var methodDecls = kvp.Value;
-
-         var document = solution.GetDocument(docId);
-         if (document is null)
-         {
-            continue;
-         }
-
-         var root = await document.GetSyntaxRootAsync(cancellationToken)
-                                  .ConfigureAwait(false);
-         if (root is not CompilationUnitSyntax compilationUnit)
-         {
-            continue;
-         }
-
-         var updatedRoot = compilationUnit;
-
-         if (!compilationUnit.HasUsing("System.Threading"))
-         {
-            var usingDirective = SyntaxFactory.UsingDirective(
-                                                 SyntaxFactory.ParseName("System.Threading"))
-                                              .WithTrailingTrivia(SyntaxFactory.ElasticCarriageReturnLineFeed);
-
-            updatedRoot = updatedRoot.AddUsings(usingDirective);
-         }
-
-         var ctType = SyntaxFactory.IdentifierName("CancellationToken");
-
-         updatedRoot = updatedRoot.ReplaceNodes(
-            methodDecls,
-            (original, _) =>
-            {
-               foreach (var p in original.ParameterList.Parameters)
-               {
-                  if (p.Type is IdentifierNameSyntax id &&
-                      string.Equals(id.Identifier.Text, "CancellationToken", StringComparison.Ordinal))
-                  {
-                     return original;
-                  }
-               }
-
-               var parameters = original.ParameterList.Parameters;
-
-               var ctParam = SyntaxFactory.Parameter(SyntaxFactory.Identifier("ct"))
-                                          .WithType(ctType)
-                                          .WithDefault(
-                                             SyntaxFactory.EqualsValueClause(
-                                                SyntaxFactory.LiteralExpression(SyntaxKind.DefaultLiteralExpression)));
-
-               var insertIndex = parameters.Count;
-               for (var i = 0; i < parameters.Count; i++)
-               {
-                  if (!parameters[i]
-                       .Modifiers
-                       .Any(SyntaxKind.ParamsKeyword))
-                  {
-                     continue;
-                  }
-
-                  insertIndex = i;
-                  break;
-               }
-
-               var newParameters = parameters.Insert(insertIndex, ctParam);
-
-               return original.WithParameterList(
-                  original.ParameterList.WithParameters(newParameters));
-            });
-
-         solution = solution.WithDocumentSyntaxRoot(docId, updatedRoot);
-      }
-
-      return solution;
-   }
-
-   private static async Task<Solution> MoveCancellationTokenToLastForInterfaceAndImplementationsAsync(Solution solution,
-      IMethodSymbol interfaceMethod,
-      CancellationToken cancellationToken)
-   {
-      var methodsByDocument = await GetInterfaceAndImplementationDeclarationsAsync(
-            solution,
-            interfaceMethod,
-            cancellationToken)
-         .ConfigureAwait(false);
-
-      foreach (var kvp in methodsByDocument)
-      {
-         var docId = kvp.Key;
-         var methodDecls = kvp.Value;
-
-         var document = solution.GetDocument(docId);
-         if (document is null)
-         {
-            continue;
-         }
-
-         var root = await document.GetSyntaxRootAsync(cancellationToken)
-                                  .ConfigureAwait(false);
-         if (root is null)
-         {
-            continue;
-         }
-
-         var newRoot = root.ReplaceNodes(
-            methodDecls,
-            (original, _) =>
-            {
-               var parameters = original.ParameterList.Parameters;
-
-               var ctIndex = -1;
-               for (var i = 0; i < parameters.Count; i++)
-               {
-                  if (parameters[i].Type is not IdentifierNameSyntax id ||
-                      !string.Equals(id.Identifier.Text, "CancellationToken", StringComparison.Ordinal))
-                  {
-                     continue;
-                  }
-
-                  ctIndex = i;
-                  break;
-               }
-
-               if (ctIndex < 0)
-               {
-                  return original;
-               }
-
-               var paramsIndex = -1;
-               for (var i = 0; i < parameters.Count; i++)
-               {
-                  if (parameters[i]
-                      .Modifiers
-                      .Any(SyntaxKind.ParamsKeyword))
-                  {
-                     paramsIndex = i;
-                     break;
-                  }
-               }
-
-               var alreadyCorrect =
-                  (paramsIndex < 0 && ctIndex == parameters.Count - 1) ||
-                  (paramsIndex >= 0 && ctIndex == paramsIndex - 1);
-
-               if (alreadyCorrect)
-               {
-                  return original;
-               }
-
-               var ctSyntax = parameters[ctIndex];
-               var withoutCt = parameters.RemoveAt(ctIndex);
-
-               var newParamsIndex = -1;
-               for (var i = 0; i < withoutCt.Count; i++)
-               {
-                  if (!withoutCt[i]
-                       .Modifiers
-                       .Any(SyntaxKind.ParamsKeyword))
-                  {
-                     continue;
-                  }
-
-                  newParamsIndex = i;
-                  break;
-               }
-
-               var newParameters = newParamsIndex >= 0
-                  ? withoutCt.Insert(newParamsIndex, ctSyntax)
-                  : withoutCt.Add(ctSyntax);
-
-               return original.WithParameterList(
-                  original.ParameterList.WithParameters(newParameters));
-            });
-
-         solution = solution.WithDocumentSyntaxRoot(docId, newRoot);
-      }
-
-      return solution;
    }
 
    private static async Task<Document> MoveCancellationTokenToLastInLambdaAsync(Document document,
@@ -778,18 +555,7 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
 
       var parameters = parenthesized.ParameterList.Parameters;
 
-      var ctIndex = -1;
-      for (var i = 0; i < parameters.Count; i++)
-      {
-         if (!string.Equals(parameters[i].Identifier.Text, ctSymbol.Name, StringComparison.Ordinal))
-         {
-            continue;
-         }
-
-         ctIndex = i;
-         break;
-      }
-
+      var ctIndex = FindParameterIndex(parameters, ctSymbol.Name);
       if (ctIndex < 0 || ctIndex == parameters.Count - 1)
       {
          return document;
@@ -806,107 +572,239 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
       return document.WithSyntaxRoot(newRoot);
    }
 
-   private static async Task<Solution> RenameCancellationTokenForInterfaceAndImplementationsAsync(Solution solution,
-      IMethodSymbol interfaceMethod,
+   private static async Task<Solution> AddCancellationTokenForHierarchyAsync(Solution solution,
+      string rootMethodId,
+      MethodHierarchyKind hierarchyKind,
       CancellationToken cancellationToken)
    {
-      var ctIndex = -1;
-      for (var i = 0; i < interfaceMethod.Parameters.Length; i++)
+      var methodIds = await CollectMethodIdsAsync(solution, rootMethodId, hierarchyKind, cancellationToken)
+         .ConfigureAwait(false);
+
+      var documentEdits = new Dictionary<DocumentId, List<string>>();
+
+      // Group method IDs by document
+      foreach (var methodId in methodIds)
       {
-         if (!interfaceMethod.Parameters[i]
-                             .Type
-                             .IsCancellationToken())
+         var location = await FindMethodLocationAsync(solution, methodId, cancellationToken)
+            .ConfigureAwait(false);
+
+         if (location is null)
          {
             continue;
          }
 
-         ctIndex = i;
-         break;
+         if (!documentEdits.TryGetValue(location.Value.DocumentId, out var list))
+         {
+            list = [];
+            documentEdits[location.Value.DocumentId] = list;
+         }
+
+         list.Add(methodId);
       }
 
-      if (ctIndex < 0)
+      // Process each document once with all its method edits
+      foreach (var kvp in documentEdits)
       {
-         return solution;
-      }
+         var docId = kvp.Key;
+         var methodIdsInDoc = kvp.Value;
 
-      var methodIds = new List<string>();
-
-      var interfaceId = interfaceMethod.GetDocumentationCommentId();
-      if (!string.IsNullOrEmpty(interfaceId))
-      {
-         methodIds.Add(interfaceId!);
-      }
-
-      var impls = await SymbolFinder.FindImplementationsAsync(
-                                       interfaceMethod,
-                                       solution,
-                                       null,
-                                       cancellationToken)
-                                    .ConfigureAwait(false);
-
-      foreach (var impl in impls.OfType<IMethodSymbol>())
-      {
-         if (impl.DeclaringSyntaxReferences.Length == 0)
+         var document = solution.GetDocument(docId);
+         if (document is null)
          {
             continue;
          }
 
-         var id = impl.GetDocumentationCommentId();
-         if (!string.IsNullOrEmpty(id))
+         var root = await document.GetSyntaxRootAsync(cancellationToken)
+                                  .ConfigureAwait(false);
+         if (root is not CompilationUnitSyntax compilationUnit)
          {
-            methodIds.Add(id!);
+            continue;
          }
+
+         var semanticModel = await document.GetSemanticModelAsync(cancellationToken)
+                                           .ConfigureAwait(false);
+         if (semanticModel is null)
+         {
+            continue;
+         }
+
+         var updatedRoot = EnsureUsingDirective(compilationUnit);
+
+         // Find all method declarations to update in this document
+         var methodsToUpdate = new List<MethodDeclarationSyntax>();
+         foreach (var methodId in methodIdsInDoc)
+         {
+            var methodDecl = FindMethodDeclarationById(updatedRoot, semanticModel, methodId, cancellationToken);
+            if (methodDecl is not null && !HasCancellationTokenParameter(methodDecl))
+            {
+               methodsToUpdate.Add(methodDecl);
+            }
+         }
+
+         if (methodsToUpdate.Count == 0)
+         {
+            continue;
+         }
+
+         updatedRoot = updatedRoot.ReplaceNodes(
+            methodsToUpdate,
+            (original, _) =>
+            {
+               var parameters = original.ParameterList.Parameters;
+               var ctParam = CreateCancellationTokenParameter();
+               var insertIndex = GetInsertIndexBeforeParams(parameters);
+               var newParameters = parameters.Insert(insertIndex, ctParam);
+
+               return original.WithParameterList(
+                  original.ParameterList.WithParameters(newParameters));
+            });
+
+         solution = solution.WithDocumentSyntaxRoot(docId, updatedRoot);
       }
+
+      return solution;
+   }
+
+   private static async Task<Solution> MoveCancellationTokenToLastForHierarchyAsync(Solution solution,
+      string rootMethodId,
+      MethodHierarchyKind hierarchyKind,
+      CancellationToken cancellationToken)
+   {
+      var methodIds = await CollectMethodIdsAsync(solution, rootMethodId, hierarchyKind, cancellationToken)
+         .ConfigureAwait(false);
+
+      var documentEdits = new Dictionary<DocumentId, List<string>>();
 
       foreach (var methodId in methodIds)
       {
-         IMethodSymbol? methodSymbol = null;
+         var location = await FindMethodLocationAsync(solution, methodId, cancellationToken)
+            .ConfigureAwait(false);
 
-         foreach (var project in solution.Projects)
+         if (location is null)
          {
-            var compilation = await project.GetCompilationAsync(cancellationToken)
+            continue;
+         }
+
+         if (!documentEdits.TryGetValue(location.Value.DocumentId, out var list))
+         {
+            list = [];
+            documentEdits[location.Value.DocumentId] = list;
+         }
+
+         list.Add(methodId);
+      }
+
+      foreach (var kvp in documentEdits)
+      {
+         var docId = kvp.Key;
+         var methodIdsInDoc = kvp.Value;
+
+         var document = solution.GetDocument(docId);
+         if (document is null)
+         {
+            continue;
+         }
+
+         var root = await document.GetSyntaxRootAsync(cancellationToken)
+                                  .ConfigureAwait(false);
+         if (root is null)
+         {
+            continue;
+         }
+
+         var semanticModel = await document.GetSemanticModelAsync(cancellationToken)
                                            .ConfigureAwait(false);
-            if (compilation is null)
+         if (semanticModel is null)
+         {
+            continue;
+         }
+
+         var methodsToUpdate = new List<MethodDeclarationSyntax>();
+         foreach (var methodId in methodIdsInDoc)
+         {
+            var methodDecl = FindMethodDeclarationById(root, semanticModel, methodId, cancellationToken);
+            if (methodDecl is null)
             {
                continue;
             }
 
-            var symbol = DocumentationCommentId.GetFirstSymbolForDeclarationId(methodId, compilation)
-               as IMethodSymbol;
-
-            if (symbol is null)
+            var ctIndex = FindCancellationTokenIndex(methodDecl.ParameterList.Parameters);
+            if (ctIndex < 0)
             {
                continue;
             }
 
-            methodSymbol = symbol;
-            break;
+            var paramsIndex = FindParamsIndex(methodDecl.ParameterList.Parameters);
+            if (!IsAlreadyInCorrectPosition(ctIndex, methodDecl.ParameterList.Parameters.Count, paramsIndex))
+            {
+               methodsToUpdate.Add(methodDecl);
+            }
          }
 
-         if (methodSymbol is null)
+         if (methodsToUpdate.Count == 0)
          {
             continue;
          }
 
-         if (ctIndex >= methodSymbol.Parameters.Length)
+         var newRoot = root.ReplaceNodes(
+            methodsToUpdate,
+            (original, _) =>
+            {
+               var parameters = original.ParameterList.Parameters;
+               var ctIndex = FindCancellationTokenIndex(parameters);
+
+               if (ctIndex < 0)
+               {
+                  return original;
+               }
+
+               var paramsIndex = FindParamsIndex(parameters);
+               var newParameters = MoveParameterToEnd(parameters, ctIndex, paramsIndex);
+
+               return original.WithParameterList(
+                  original.ParameterList.WithParameters(newParameters));
+            });
+
+         solution = solution.WithDocumentSyntaxRoot(docId, newRoot);
+      }
+
+      return solution;
+   }
+
+   private static async Task<Solution> RenameCancellationTokenForHierarchyAsync(Solution solution,
+      string rootMethodId,
+      int ctParameterIndex,
+      MethodHierarchyKind hierarchyKind,
+      CancellationToken cancellationToken)
+   {
+      var methodIds = await CollectMethodIdsAsync(solution, rootMethodId, hierarchyKind, cancellationToken)
+         .ConfigureAwait(false);
+
+      // Process renames one at a time, re-resolving symbols after each rename
+      foreach (var methodId in methodIds)
+      {
+         var methodSymbol = await ResolveMethodSymbolAsync(solution, methodId, cancellationToken)
+            .ConfigureAwait(false);
+
+         if (methodSymbol is null || ctParameterIndex >= methodSymbol.Parameters.Length)
          {
             continue;
          }
 
-         var p = methodSymbol.Parameters[ctIndex];
-         if (!p.Type.IsCancellationToken())
+         var param = methodSymbol.Parameters[ctParameterIndex];
+         if (!param.Type.IsCancellationToken())
          {
             continue;
          }
 
-         if (string.Equals(p.Name, "ct", StringComparison.Ordinal))
+         if (string.Equals(param.Name, "ct", StringComparison.Ordinal))
          {
             continue;
          }
 
          solution = await Renamer.RenameSymbolAsync(
                                     solution,
-                                    p,
+                                    param,
                                     new SymbolRenameOptions(),
                                     "ct",
                                     cancellationToken)
@@ -916,64 +814,251 @@ public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
       return solution;
    }
 
-   private static async Task<Dictionary<DocumentId, ImmutableArray<MethodDeclarationSyntax>>>
-      GetInterfaceAndImplementationDeclarationsAsync(Solution solution,
-         IMethodSymbol interfaceMethod,
-         CancellationToken cancellationToken)
+   private static async Task<ImmutableArray<string>> CollectMethodIdsAsync(Solution solution,
+      string rootMethodId,
+      MethodHierarchyKind hierarchyKind,
+      CancellationToken cancellationToken)
    {
-      var allMethods = ImmutableArray.CreateBuilder<IMethodSymbol>();
-      allMethods.Add(interfaceMethod);
+      var methodIds = ImmutableArray.CreateBuilder<string>();
+      methodIds.Add(rootMethodId);
 
-      var impls = await SymbolFinder.FindImplementationsAsync(
-                                       interfaceMethod,
-                                       solution,
-                                       null,
-                                       cancellationToken)
-                                    .ConfigureAwait(false);
+      var rootMethod = await ResolveMethodSymbolAsync(solution, rootMethodId, cancellationToken)
+         .ConfigureAwait(false);
 
-      foreach (var impl in impls.OfType<IMethodSymbol>())
+      if (rootMethod is null)
       {
-         if (impl.DeclaringSyntaxReferences.Length > 0)
-         {
-            allMethods.Add(impl);
-         }
+         return methodIds.ToImmutable();
       }
 
-      var methodsByDocument = new Dictionary<DocumentId, ImmutableArray<MethodDeclarationSyntax>.Builder>();
-
-      foreach (var syntaxRef in allMethods.SelectMany(method => method.DeclaringSyntaxReferences))
+      var relatedMethods = hierarchyKind switch
       {
-         var syntax = await syntaxRef.GetSyntaxAsync(cancellationToken)
-                                     .ConfigureAwait(false);
+         MethodHierarchyKind.Interface => await SymbolFinder.FindImplementationsAsync(
+                                                               rootMethod,
+                                                               solution,
+                                                               null,
+                                                               cancellationToken)
+                                                            .ConfigureAwait(false),
 
-         if (syntax is not MethodDeclarationSyntax methodDecl)
+         MethodHierarchyKind.Virtual => await SymbolFinder.FindOverridesAsync(
+                                                             rootMethod,
+                                                             solution,
+                                                             null,
+                                                             cancellationToken)
+                                                          .ConfigureAwait(false),
+
+         _ => []
+      };
+
+      foreach (var related in relatedMethods.OfType<IMethodSymbol>())
+      {
+         if (related.DeclaringSyntaxReferences.Length == 0)
          {
             continue;
          }
 
-         var doc = solution.GetDocument(methodDecl.SyntaxTree);
-         if (doc is null)
+         var id = related.GetDocumentationCommentId();
+         if (!string.IsNullOrEmpty(id))
+         {
+            methodIds.Add(id!);
+         }
+      }
+
+      return methodIds.ToImmutable();
+   }
+
+   private static async Task<IMethodSymbol?> ResolveMethodSymbolAsync(Solution solution,
+      string methodId,
+      CancellationToken cancellationToken)
+   {
+      foreach (var project in solution.Projects)
+      {
+         var compilation = await project.GetCompilationAsync(cancellationToken)
+                                        .ConfigureAwait(false);
+         if (compilation is null)
          {
             continue;
          }
 
-         var docId = doc.Id;
-
-         if (!methodsByDocument.TryGetValue(docId, out var list))
+         if (DocumentationCommentId.GetFirstSymbolForDeclarationId(methodId, compilation)
+             is IMethodSymbol methodSymbol)
          {
-            list = ImmutableArray.CreateBuilder<MethodDeclarationSyntax>();
-            methodsByDocument[docId] = list;
+            return methodSymbol;
+         }
+      }
+
+      return null;
+   }
+
+   private static async Task<(DocumentId DocumentId, SyntaxReference Reference)?> FindMethodLocationAsync(
+      Solution solution,
+      string methodId,
+      CancellationToken cancellationToken)
+   {
+      var methodSymbol = await ResolveMethodSymbolAsync(solution, methodId, cancellationToken)
+         .ConfigureAwait(false);
+
+      if (methodSymbol is null || methodSymbol.DeclaringSyntaxReferences.Length == 0)
+      {
+         return null;
+      }
+
+      var syntaxRef = methodSymbol.DeclaringSyntaxReferences[0];
+      var document = solution.GetDocument(syntaxRef.SyntaxTree);
+
+      if (document is null)
+      {
+         return null;
+      }
+
+      return (document.Id, syntaxRef);
+   }
+
+   private static MethodDeclarationSyntax? FindMethodDeclarationById(SyntaxNode root,
+      SemanticModel semanticModel,
+      string methodId,
+      CancellationToken cancellationToken)
+   {
+      foreach (var methodDecl in root.DescendantNodes()
+                                     .OfType<MethodDeclarationSyntax>())
+      {
+         var symbol = semanticModel.GetDeclaredSymbol(methodDecl, cancellationToken);
+         if (symbol is null)
+         {
+            continue;
          }
 
-         list.Add(methodDecl);
+         var id = symbol.GetDocumentationCommentId();
+         if (string.Equals(id, methodId, StringComparison.Ordinal))
+         {
+            return methodDecl;
+         }
       }
 
-      var result = new Dictionary<DocumentId, ImmutableArray<MethodDeclarationSyntax>>();
-      foreach (var kvp in methodsByDocument)
+      return null;
+   }
+
+   private static CompilationUnitSyntax EnsureUsingDirective(CompilationUnitSyntax compilationUnit)
+   {
+      if (compilationUnit.HasUsing("System.Threading"))
       {
-         result[kvp.Key] = kvp.Value.ToImmutable();
+         return compilationUnit;
       }
 
-      return result;
+      var usingDirective = SyntaxFactory.UsingDirective(
+                                           SyntaxFactory.ParseName("System.Threading"))
+                                        .WithTrailingTrivia(SyntaxFactory.ElasticCarriageReturnLineFeed);
+
+      return compilationUnit.AddUsings(usingDirective);
+   }
+
+   private static ParameterSyntax CreateCancellationTokenParameter()
+   {
+      return SyntaxFactory.Parameter(SyntaxFactory.Identifier("ct"))
+                          .WithType(SyntaxFactory.IdentifierName("CancellationToken"))
+                          .WithDefault(
+                             SyntaxFactory.EqualsValueClause(
+                                SyntaxFactory.LiteralExpression(SyntaxKind.DefaultLiteralExpression)));
+   }
+
+   private static int GetInsertIndexBeforeParams(SeparatedSyntaxList<ParameterSyntax> parameters)
+   {
+      for (var i = 0; i < parameters.Count; i++)
+      {
+         if (parameters[i]
+             .Modifiers
+             .Any(SyntaxKind.ParamsKeyword))
+         {
+            return i;
+         }
+      }
+
+      return parameters.Count;
+   }
+
+   private static int FindParameterIndex(SeparatedSyntaxList<ParameterSyntax> parameters, string name)
+   {
+      for (var i = 0; i < parameters.Count; i++)
+      {
+         if (string.Equals(parameters[i].Identifier.Text, name, StringComparison.Ordinal))
+         {
+            return i;
+         }
+      }
+
+      return -1;
+   }
+
+   private static int FindParamsIndex(SeparatedSyntaxList<ParameterSyntax> parameters)
+   {
+      for (var i = 0; i < parameters.Count; i++)
+      {
+         if (parameters[i]
+             .Modifiers
+             .Any(SyntaxKind.ParamsKeyword))
+         {
+            return i;
+         }
+      }
+
+      return -1;
+   }
+
+   private static int FindCancellationTokenIndex(SeparatedSyntaxList<ParameterSyntax> parameters)
+   {
+      for (var i = 0; i < parameters.Count; i++)
+      {
+         if (parameters[i].Type is IdentifierNameSyntax id &&
+             string.Equals(id.Identifier.Text, "CancellationToken", StringComparison.Ordinal))
+         {
+            return i;
+         }
+      }
+
+      return -1;
+   }
+
+   private static bool HasCancellationTokenParameter(MethodDeclarationSyntax methodDecl)
+   {
+      return FindCancellationTokenIndex(methodDecl.ParameterList.Parameters) >= 0;
+   }
+
+   private static bool IsAlreadyInCorrectPosition(int ctIndex, int totalCount, int paramsIndex)
+   {
+      return (paramsIndex < 0 && ctIndex == totalCount - 1) ||
+             (paramsIndex >= 0 && ctIndex == paramsIndex - 1);
+   }
+
+   private static SeparatedSyntaxList<ParameterSyntax> MoveParameterToEnd(
+      SeparatedSyntaxList<ParameterSyntax> parameters,
+      int indexToMove,
+      int paramsIndex)
+   {
+      var paramToMove = parameters[indexToMove];
+      var withoutParam = parameters.RemoveAt(indexToMove);
+
+      // Recalculate params index after removal
+      var newParamsIndex = -1;
+      for (var i = 0; i < withoutParam.Count; i++)
+      {
+         if (!withoutParam[i]
+              .Modifiers
+              .Any(SyntaxKind.ParamsKeyword))
+         {
+            continue;
+         }
+
+         newParamsIndex = i;
+         break;
+      }
+
+      return newParamsIndex >= 0
+         ? withoutParam.Insert(newParamsIndex, paramToMove)
+         : withoutParam.Add(paramToMove);
+   }
+
+   private enum MethodHierarchyKind
+   {
+      Interface,
+      Virtual
    }
 }

@@ -60,11 +60,21 @@ public sealed class AsyncMethodConventionsAnalyzer : DiagnosticAnalyzer
       context.EnableConcurrentExecution();
       context.ConfigureGeneratedCodeAnalysis(GeneratedCodeAnalysisFlags.None);
 
-      context.RegisterSymbolAction(AnalyzeMethod, SymbolKind.Method);
-      context.RegisterOperationAction(AnalyzeMinimalApiInvocation, OperationKind.Invocation);
+      context.RegisterCompilationStartAction(compilationContext =>
+      {
+         var compilation = compilationContext.Compilation;
+
+         compilationContext.RegisterSymbolAction(
+            ctx => AnalyzeMethod(ctx, compilation),
+            SymbolKind.Method);
+
+         compilationContext.RegisterOperationAction(
+            AnalyzeMinimalApiInvocation,
+            OperationKind.Invocation);
+      });
    }
 
-   private static void AnalyzeMethod(SymbolAnalysisContext context)
+   private static void AnalyzeMethod(SymbolAnalysisContext context, Compilation compilation)
    {
       var method = (IMethodSymbol)context.Symbol;
 
@@ -101,6 +111,24 @@ public sealed class AsyncMethodConventionsAnalyzer : DiagnosticAnalyzer
          {
             return;
          }
+      }
+
+      // Skip SignalR hub methods - they are callable from clients
+      if (method.IsSignalRHubMethod())
+      {
+         return;
+      }
+
+      // Skip SignalR client interface methods - they are invoked by server to clients
+      if (method.IsSignalRClientMethod(compilation))
+      {
+         return;
+      }
+
+      // Skip SignalR hub interface methods - they are callable from clients
+      if (method.IsSignalRHubInterfaceMethod(compilation))
+      {
+         return;
       }
 
       AnalyzeAsyncMember(
