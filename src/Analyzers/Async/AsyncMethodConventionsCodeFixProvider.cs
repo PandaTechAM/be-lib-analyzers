@@ -21,12 +21,12 @@ namespace Pandatech.Analyzers.Async;
 public sealed class AsyncMethodConventionsCodeFixProvider : CodeFixProvider
 {
    public override ImmutableArray<string> FixableDiagnosticIds { get; } =
-      ImmutableArray.Create(
-         AsyncMethodConventionsAnalyzer.AsyncSuffixId,
-         AsyncMethodConventionsAnalyzer.CancellationTokenMissingId,
-         AsyncMethodConventionsAnalyzer.CancellationTokenNameId,
-         AsyncMethodConventionsAnalyzer.CancellationTokenPositionId
-      );
+   [
+      AsyncMethodConventionsAnalyzer.AsyncSuffixId,
+      AsyncMethodConventionsAnalyzer.CancellationTokenMissingId,
+      AsyncMethodConventionsAnalyzer.CancellationTokenNameId,
+      AsyncMethodConventionsAnalyzer.CancellationTokenPositionId
+   ];
 
    public override FixAllProvider GetFixAllProvider()
    {

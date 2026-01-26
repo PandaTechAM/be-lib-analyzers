@@ -113,6 +113,13 @@ public sealed class AsyncMethodConventionsAnalyzer : DiagnosticAnalyzer
          }
       }
 
+      // Skip entry point methods (Main, <Main>$) - runtime contract
+      var entryPoint = compilation.GetEntryPoint(context.CancellationToken);
+      if (entryPoint is not null && SymbolEqualityComparer.Default.Equals(method, entryPoint))
+      {
+         return;
+      }
+
       // Skip SignalR hub methods - they are callable from clients
       if (method.IsSignalRHubMethod())
       {

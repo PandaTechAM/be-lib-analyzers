@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/Solution Items/">
+    <File Path=".editorconfig" />
+    <File Path=".github/workflows/main.yml" />
+    <File Path=".gitignore" />
+    <File Path="Readme.md" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Analyzers/Analyzers.csproj" />
+  </Folder>
+  <Folder Name="/test/">
+    <Project Path="test/Analyzers.Sample/Analyzers.Sample.csproj" />
+    <Project Path="test/Analyzers.Tests/Analyzers.Tests.csproj" />
+  </Folder>
+</Solution>
