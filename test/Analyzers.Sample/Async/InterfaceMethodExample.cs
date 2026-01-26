@@ -22,7 +22,7 @@ public interface IOrderService
    Task<Order> GetSomethingAsync(CancellationToken ct = default, params string[] args);
 
    // PT0002: no CT at all (only optional + params)
-   Task<Order> GetMeAsync(int id = 5, params object[] args);
+   Task<Order> GetMeAsync(int id = 5, CancellationToken ct = default, params object[] args);
 }
 
 public sealed class OrderService : IOrderService
@@ -51,7 +51,7 @@ public sealed class OrderService : IOrderService
       throw new NotImplementedException();
    }
 
-   public Task<Order> GetMeAsync(int id = 5, params object[] args)
+   public Task<Order> GetMeAsync(int id = 5, CancellationToken ct = default, params object[] args)
    {
       throw new NotImplementedException();
    }

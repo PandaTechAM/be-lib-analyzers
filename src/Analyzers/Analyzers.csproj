@@ -18,13 +18,13 @@
         <PackageId>Pandatech.Analyzers</PackageId>
         <PackageIcon>pandatech.png</PackageIcon>
         <PackageReadmeFile>Readme.md</PackageReadmeFile>
-        <Version>1.6.0</Version>
+        <Version>2.0.0</Version>
         <Authors>Pandatech</Authors>
         <Description>Pandatech Roslyn analyzers enforcing company coding rules.</Description>
         <PackageLicenseExpression>MIT</PackageLicenseExpression>
         <PackageTags>Pandatech, analyzers, roslyn, async, cancellation, coding-rules</PackageTags>
         <RepositoryUrl>https://github.com/PandaTechAM/be-lib-analyzers</RepositoryUrl>
-        <PackageReleaseNotes>Async rules final cleanup and bug fixes</PackageReleaseNotes>
+        <PackageReleaseNotes>Edge cases with signal R and abstract classes handled + perf boost</PackageReleaseNotes>
 
 
     </PropertyGroup>
@@ -34,7 +34,7 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="4.8.0" PrivateAssets="all"/>
+        <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="5.0.0" PrivateAssets="all" />
         <PackageReference Include="Microsoft.CodeAnalysis.Analyzers"
                           Version="3.11.0"
                           PrivateAssets="all"/>
